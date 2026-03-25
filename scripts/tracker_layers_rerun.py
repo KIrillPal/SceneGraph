@@ -106,9 +106,15 @@ def get_obj_point_cloud(
 
 
 class TrackLike:
-    def __init__(self, track_id: int, masks: dict[int, np.ndarray]):
+    def __init__(
+        self,
+        track_id: int,
+        masks: dict[int, np.ndarray],
+        voxels_by_frame: Optional[dict[int, np.ndarray]] = None,
+    ):
         self.id = track_id
         self.masks = masks
+        self.voxels_by_frame = voxels_by_frame or {}
 
 
 def track_point_clouds_at_frame(
@@ -168,11 +174,33 @@ def tracks_to_merged_open3d_pcd(
     return merged
 
 
+def merged_track_voxels_at_frame(
+    frame_idx: int,
+    all_tracks: list[TrackLike],
+    points_per_frame: list[np.ndarray],
+    points_per_frame_masks: list[np.ndarray],
+    h: int,
+    w: int,
+) -> list[tuple[int, np.ndarray]]:
+    """Объектные merged-облака из сохраненной истории voxelmap по кадрам."""
+    merged_clouds: list[tuple[int, np.ndarray]] = []
+    for track in all_tracks:
+        pts = track.voxels_by_frame.get(frame_idx)
+        if pts is None:
+            continue
+        pts = np.asarray(pts, dtype=np.float32)
+        if len(pts) == 0:
+            continue
+        merged_clouds.append((track.id, pts))
+    return merged_clouds
+
+
 # --- Rerun --------------------------------------------------------------------
 
 CAMERA_ENTITY = "world/camera"
 ENTITY_SCENE = "world/scene_frame"
 ENTITY_TRACKS = "world/track_points"
+ENTITY_TRACK_VOXELS = "world/track_voxels_merged"
 ENTITY_TRACK_LABELS = "world/track_labels"
 ENTITY_COMBINED = "world/scene_combined"
 
@@ -184,6 +212,7 @@ DESCRIPTION = """
 | `world/camera` | Поза камеры + pinhole |
 | `world/scene_frame` | Облако сцены на кадре |
 | `world/track_points` | Треки на кадре |
+| `world/track_voxels_merged` | Объектные merged-облака из `track.voxels` на кадре |
 | `world/track_labels` | Номера треков (центр облака, подписи в 3D) |
 | `world/scene_combined` | Статическое облако из combined_pcd.ply (RGBA, см. `combined_alpha` в config) |
 """.strip()
@@ -302,7 +331,19 @@ def _load_tracks_pickle(path: Path) -> list[TrackLike]:
     out: list[TrackLike] = []
     for item in raw:
         masks = {int(k): v for k, v in item["masks"].items()}
-        out.append(TrackLike(int(item["id"]), masks))
+        voxels_by_frame_raw = item.get("voxels_by_frame")
+        if voxels_by_frame_raw is not None:
+            voxels_by_frame = {
+                int(k): np.asarray(v, dtype=np.float32) for k, v in voxels_by_frame_raw.items()
+            }
+        else:
+            # Backward compatibility со старым экспортом (одно итоговое облако)
+            voxels_local = item.get("voxels_local")
+            voxels_by_frame = {}
+            if voxels_local is not None:
+                last_frame = max(masks.keys()) if masks else 0
+                voxels_by_frame[last_frame] = np.asarray(voxels_local, dtype=np.float32)
+        out.append(TrackLike(int(item["id"]), masks, voxels_by_frame))
     return out
 
 
@@ -331,6 +372,8 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
     fps = float(cfg.get("fps", 5.0))
     scene_sub = int(cfg.get("scene_sub", 2))
     track_sub = int(cfg.get("track_sub", 1))
+    track_voxels_sub = int(cfg.get("track_voxels_sub", 1))
+    track_voxels_radius = float(cfg.get("track_voxels_radius", 0.004))
     combined_sub = int(cfg.get("combined_sub", 2))
     # непрозрачность combined: float 0..1 в config (по умолчанию ~полупрозрачные точки)
     combined_alpha = float(cfg.get("combined_alpha", 0.35))
@@ -420,6 +463,45 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
         else:
             tr_cols_u8 = None
         _log_points(tr_pts, tr_cols_u8, ENTITY_TRACKS, subsample=track_sub, static=False)
+
+        merged_voxels_clouds = merged_track_voxels_at_frame(
+            i,
+            all_tracks,
+            points_per_frame,
+            points_per_frame_masks,
+            hi,
+            wi,
+        )
+        id_to_j = {t.id: j for j, t in enumerate(all_tracks)}
+        if merged_voxels_clouds:
+            mv_parts: list[np.ndarray] = []
+            mv_cols: list[np.ndarray] = []
+            for tid, pts in merged_voxels_clouds:
+                mv_parts.append(pts)
+                j = id_to_j.get(tid, 0)
+                c = (np.asarray(track_colors[j], dtype=np.float64) * 255.0).clip(0, 255).astype(
+                    np.uint8
+                )
+                mv_cols.append(np.tile(c, (len(pts), 1)))
+            mv_pts = np.vstack(mv_parts)
+            mv_cols_u8 = np.vstack(mv_cols)
+            _log_points(
+                mv_pts,
+                mv_cols_u8,
+                ENTITY_TRACK_VOXELS,
+                subsample=track_voxels_sub,
+                static=False,
+                radius=track_voxels_radius,
+            )
+        else:
+            _log_points(
+                np.zeros((0, 3)),
+                None,
+                ENTITY_TRACK_VOXELS,
+                subsample=1,
+                static=False,
+                radius=track_voxels_radius,
+            )
 
     rr.script_teardown(rr_args)
     print("Saved:", rrd_out)
