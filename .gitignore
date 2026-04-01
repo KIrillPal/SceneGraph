@@ -3,5 +3,6 @@ hf_token.txt
 
 sam3/data
 *.pt
+*.pth
 *.tar
 *.codex
