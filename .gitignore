@@ -1,2 +1,7 @@
 __pycache__/
 hf_token.txt
+
+sam3/data
+*.pt
+*.tar
+*.codex
