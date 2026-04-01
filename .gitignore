@@ -2,7 +2,14 @@ __pycache__/
 hf_token.txt
 
 sam3/data
+sam3/assets
 *.pt
 *.pth
 *.tar
 *.codex
+*/.cache
+Depth-Anything-3/da3_streaming/data
+Depth-Anything-3/da3_streaming/weights
+Depth-Anything-3/da3_streaming/exps/
+Depth-Anything-3/da3_streaming/.cache
+*/.flake8
