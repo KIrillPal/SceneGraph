@@ -89,6 +89,18 @@ class TrackLike:
         self.voxels_by_frame = voxels_by_frame or {}
 
 
+def _make_track_color_map(all_tracks: list[TrackLike]) -> dict[int, np.ndarray]:
+    colors = distinctipy.get_colors(len(all_tracks))
+    return {
+        int(track.id): (np.asarray(color, dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
+        for track, color in zip(all_tracks, colors)
+    }
+
+
+def _rgb_to_bgr(color: np.ndarray) -> np.ndarray:
+    return np.asarray(color, dtype=np.uint8)[::-1]
+
+
 def statistical_outlier_removal(
     points: np.ndarray,
     k: int = 10,
@@ -180,10 +192,9 @@ def tracks_to_merged_open3d_pcd(
     points_per_frame_masks: list[np.ndarray],
     h: int,
     w: int,
-    track_colors: np.ndarray,
+    track_colors: dict[int, np.ndarray],
     clouds: Optional[list[tuple[int, np.ndarray]]] = None,
 ) -> o3d.geometry.PointCloud:
-    id_to_j = {t.id: j for j, t in enumerate(all_tracks)}
     if clouds is None:
         clouds = track_point_clouds_at_frame(
             frame_idx, all_tracks, points_per_frame, points_per_frame_masks, h, w
@@ -194,8 +205,7 @@ def tracks_to_merged_open3d_pcd(
     parts: list[np.ndarray] = []
     cols: list[np.ndarray] = []
     for tid, pts in clouds:
-        j = id_to_j.get(tid, 0)
-        c = np.asarray(track_colors[j], dtype=np.float64)
+        c = np.asarray(track_colors[tid], dtype=np.float64) / 255.0
         parts.append(pts)
         cols.append(np.tile(c, (len(pts), 1)))
     all_pts = np.vstack(parts)
@@ -272,14 +282,11 @@ def _find_dataset_root(export_dir: Path) -> Optional[Path]:
 
 def _infer_runtime_config(
     export_dir: Path,
-    depth_dir: Optional[Path],
 ) -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
     dataset_root = _find_dataset_root(export_dir)
 
-    if depth_dir is not None:
-        cfg["depth_dir"] = depth_dir
-    elif dataset_root is not None:
+    if dataset_root is not None:
         cfg["depth_dir"] = dataset_root / "da3_outputs" / "results_output"
     else:
         cfg["depth_dir"] = None
@@ -330,7 +337,7 @@ def _render_masked_image(
     frame_idx: int,
     image: np.ndarray,
     all_tracks: list[TrackLike],
-    track_colors: np.ndarray,
+    track_colors: dict[int, np.ndarray],
     alpha: float,
 ) -> np.ndarray:
     overlay = np.zeros_like(image)
@@ -342,14 +349,14 @@ def _render_masked_image(
         if mask.shape[:2] != (h, w):
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
         mask = mask > 0
-        color = (np.asarray(track_colors[j], dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
+        color = _rgb_to_bgr(track_colors[int(track.id)])
         overlay[mask] = color
     return cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0.0)
 
 
 def _log_track_id_labels(
     clouds: list[tuple[int, np.ndarray]],
-    track_colors: np.ndarray,
+    track_colors: dict[int, np.ndarray],
     all_tracks: list[TrackLike],
     label_radius: float = 0.02,
 ) -> None:
@@ -361,17 +368,13 @@ def _log_track_id_labels(
         )
         return
 
-    id_to_j = {t.id: j for j, t in enumerate(all_tracks)}
     centers: list[np.ndarray] = []
     labels: list[str] = []
     colors_rgb: list[np.ndarray] = []
     for tid, pts in clouds:
         centers.append(np.mean(pts, axis=0))
         labels.append(str(tid))
-        j = id_to_j.get(tid, 0)
-        c = track_colors[j]
-        rgb = (np.asarray(c, dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
-        colors_rgb.append(rgb)
+        colors_rgb.append(track_colors[tid])
     rr.log(
         ENTITY_TRACK_LABELS,
         rr.Points3D(
@@ -388,13 +391,6 @@ def _log_track_id_labels(
 def run_from_export(
     export_dir: Path,
     rr_args: argparse.Namespace,
-    depth_dir: Optional[Path],
-    fps: Optional[float],
-    scene_sub: Optional[int],
-    track_sub: Optional[int],
-    track_voxels_sub: Optional[int],
-    track_voxels_radius: Optional[float],
-    mask_alpha: Optional[float],
 ) -> None:
     export_dir = _resolve_export_dir(export_dir.resolve())
     required_files = (
@@ -407,19 +403,7 @@ def run_from_export(
     if missing:
         raise FileNotFoundError("Missing export files:\n" + "\n".join(missing))
 
-    cfg = _infer_runtime_config(export_dir, depth_dir=depth_dir)
-    if fps is not None:
-        cfg["fps"] = fps
-    if scene_sub is not None:
-        cfg["scene_sub"] = scene_sub
-    if track_sub is not None:
-        cfg["track_sub"] = track_sub
-    if track_voxels_sub is not None:
-        cfg["track_voxels_sub"] = track_voxels_sub
-    if track_voxels_radius is not None:
-        cfg["track_voxels_radius"] = track_voxels_radius
-    if mask_alpha is not None:
-        cfg["mask_alpha"] = mask_alpha
+    cfg = _infer_runtime_config(export_dir)
 
     if cfg["depth_dir"] is None:
         raise FileNotFoundError(
@@ -440,17 +424,18 @@ def run_from_export(
     with (export_dir / "points_per_frame_masks.pkl").open("rb") as f:
         points_per_frame_masks: list[np.ndarray] = pickle.load(f)
     all_tracks = _load_tracks_pickle(export_dir / "tracks.pkl")
-    track_colors = np.array(distinctipy.get_colors(len(all_tracks)), dtype=np.float64)
+    track_colors = _make_track_color_map(all_tracks)
 
     n_frames = min(len(extr), len(points_per_frame), len(points_per_frame_masks))
 
-    rr.script_setup(rr_args, "3d_tracker_rrd", default_blueprint=_build_blueprint())
+    rr.script_setup(rr_args, "3d_tracker_rrd")
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
     rr.log(
         "description",
         rr.TextDocument(DESCRIPTION, media_type=rr.MediaType.MARKDOWN),
         static=True,
     )
+    blueprint_sent = False
 
     for i in tqdm(range(n_frames), desc="Writing Rerun frames", unit="frame", dynamic_ncols=True):
         rr.set_time_sequence("frame", i)
@@ -475,8 +460,12 @@ def run_from_export(
             track_colors,
             alpha=float(cfg["mask_alpha"]),
         )
-        print(masked_image)
         rr.log(ENTITY_MASKED_IMAGE, rr.Image(masked_image, color_model="bgr"))
+        if not blueprint_sent:
+            blueprint = _build_blueprint()
+            if blueprint is not None:
+                rr.send_blueprint(blueprint, make_active=True, make_default=True)
+            blueprint_sent = True
 
         mask = points_per_frame_masks[i]
         scene_pts = points_per_frame[i]
@@ -514,16 +503,12 @@ def run_from_export(
         _log_points(tr_pts, tr_cols_u8, ENTITY_TRACKS, subsample=int(cfg["track_sub"]), static=False)
 
         merged_voxels_clouds = merged_track_voxels_at_frame(i, all_tracks)
-        id_to_j = {t.id: j for j, t in enumerate(all_tracks)}
         if merged_voxels_clouds:
             mv_parts: list[np.ndarray] = []
             mv_cols: list[np.ndarray] = []
             for tid, pts in merged_voxels_clouds:
                 mv_parts.append(pts)
-                j = id_to_j.get(tid, 0)
-                c = (np.asarray(track_colors[j], dtype=np.float64) * 255.0).clip(0, 255).astype(
-                    np.uint8
-                )
+                c = track_colors[tid]
                 mv_cols.append(np.tile(c, (len(pts), 1)))
             mv_pts = np.vstack(mv_parts)
             mv_cols_u8 = np.vstack(mv_cols)
@@ -559,18 +544,6 @@ def main() -> None:
         required=True,
         help="Path to rerun_export or its parent directory.",
     )
-    parser.add_argument(
-        "--depth-dir",
-        type=Path,
-        default=None,
-        help="Override DA3 results_output directory.",
-    )
-    parser.add_argument("--fps", type=float, default=None)
-    parser.add_argument("--scene-sub", type=int, default=None)
-    parser.add_argument("--track-sub", type=int, default=None)
-    parser.add_argument("--track-voxels-sub", type=int, default=None)
-    parser.add_argument("--track-voxels-radius", type=float, default=None)
-    parser.add_argument("--mask-alpha", type=float, default=None)
     rr.script_add_args(parser)
     args = parser.parse_args()
 
@@ -581,13 +554,6 @@ def main() -> None:
     run_from_export(
         export_dir=export_dir,
         rr_args=args,
-        depth_dir=args.depth_dir,
-        fps=args.fps,
-        scene_sub=args.scene_sub,
-        track_sub=args.track_sub,
-        track_voxels_sub=args.track_voxels_sub,
-        track_voxels_radius=args.track_voxels_radius,
-        mask_alpha=args.mask_alpha,
     )
 
 

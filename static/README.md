@@ -4,37 +4,37 @@
 - предикты и эмбеддинги SAM3
 - глубины, интринсики и экстринсики от DA3
 
-Для `data/0` структура уже соответствует ожидаемой:
-- `data/0/images`
-- `data/0/sam3_outputs/tracks`
-- `data/0/sam3_outputs/embeds`
-- `data/0/da3_outputs`
+Ожидаемая структура входных данных:
+- `<image_dir>`
+- `<sam3_tracks_dir>`
+- `<sam3_embeds_dir>`
+- `<da3_outputs_dir>`
 
 Запуск трекера:
 
 ```bash
 python static/run_tracker.py \
-  data/0/images \
-  data/0/sam3_outputs/tracks \
-  data/0/sam3_outputs/embeds \
-  data/0/da3_outputs \
-  data/0/tracker_outputs
+  <image_dir> \
+  <sam3_tracks_dir> \
+  <sam3_embeds_dir> \
+  <da3_outputs_dir> \
+  <save_path>
 ```
 
 После запуска результаты сохраняются в:
-- `data/0/tracker_outputs/outputs`
-- `data/0/tracker_outputs/track_outputs`
-- `data/0/tracker_outputs/meta_outputs`
-- `data/0/tracker_outputs/filtered_outputs`
-- `data/0/tracker_outputs/point_outputs`
-- `data/0/tracker_outputs/rerun_export`
+- `<save_path>/outputs`
+- `<save_path>/track_outputs`
+- `<save_path>/meta_outputs`
+- `<save_path>/filtered_outputs`
+- `<save_path>/point_outputs`
+- `<save_path>/rerun_export`
 
 Сборка `.rrd` для Rerun:
 
 ```bash
 python visualization/tracker_layers_rerun.py \
-  --export-dir data/0/tracker_outputs \
-  --save data/0/tracker_outputs/tracker_layers.rrd
+  --export-dir <save_path> \
+  --save <save_path>/tracker_layers.rrd
 ```
 
 # Что Где
