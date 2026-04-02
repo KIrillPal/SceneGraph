@@ -5,11 +5,15 @@ Provides adaptive erosion, fast DBSCAN clustering, and mask merging.
 """
 
 import cv2
+import logging
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import List, Tuple, Dict
+from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def adaptive_erode_mask_area(
@@ -232,6 +236,17 @@ def merge_masks(tracks: Dict[int, Dict], area_size: int = 50) -> Dict[int, Dict]
     mask_merger = FastPixelDBSCAN()
     n = max(tracks.keys()) + 1
     all_tracks = {}
+    total_masks = sum(len(track["masks"]) for track in tracks.values())
+
+    logger.info(
+        "Merging masks for %d tracks and %d frame masks", len(tracks), total_masks
+    )
+    merge_progress = tqdm(
+        total=total_masks,
+        desc="Merging masks",
+        unit="mask",
+        dynamic_ncols=True,
+    )
 
     for key in tracks.keys():
         track = tracks[key]
@@ -271,6 +286,15 @@ def merge_masks(tracks: Dict[int, Dict], area_size: int = 50) -> Dict[int, Dict]
                     all_tracks[n]["masks"] = {i: mask}
                     n += 1
 
+            merge_progress.update(1)
+            merge_progress.set_postfix(
+                current_track=key,
+                new_tracks=max(0, n - len(tracks)),
+            )
+
         all_tracks[key] = track
+
+    merge_progress.close()
+    logger.info("Mask merge complete: %d tracks -> %d tracks", len(tracks), len(all_tracks))
 
     return all_tracks
