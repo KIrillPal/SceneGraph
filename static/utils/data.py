@@ -205,34 +205,22 @@ def create_output_dirs(save_path: str | Path) -> Dict[str, Path]:
     Create the tracker output directory layout from a single save path.
 
     Args:
-        save_path: Run-specific path such as 'vis_data/2' or
-            'vis_data/outputs/2'.
+        save_path: Base directory for one tracker run, e.g.
+            'vis_data/run_2' or 'data/0/tracker_outputs'.
 
     Returns:
         Dict with the created output directories.
     """
     save_path = Path(save_path)
-    folder_names = (
-        "outputs",
-        "track_outputs",
-        "meta_outputs",
-        "filtered_outputs",
-        "point_outputs",
-    )
-
-    if save_path.parent.name in folder_names:
-        root_dir = save_path.parent.parent
-        run_name = save_path.name
-    else:
-        root_dir = save_path.parent
-        run_name = save_path.name
 
     out_dirs = {
-        "out_dir": root_dir / "outputs" / run_name,
-        "track_out_dir": root_dir / "track_outputs" / run_name,
-        "out_meta_dir": root_dir / "meta_outputs" / run_name,
-        "out_filtered_dir": root_dir / "filtered_outputs" / run_name,
-        "out_point_dir": root_dir / "point_outputs" / run_name,
+        "base_dir": save_path,
+        "out_dir": save_path / "outputs",
+        "track_out_dir": save_path / "track_outputs",
+        "out_meta_dir": save_path / "meta_outputs",
+        "out_filtered_dir": save_path / "filtered_outputs",
+        "out_point_dir": save_path / "point_outputs",
+        "rerun_export_dir": save_path / "rerun_export",
     }
 
     for path in out_dirs.values():
@@ -272,7 +260,7 @@ def save_rerun_export(
     """
     logger.info("Saving rerun export")
     out_dirs = create_output_dirs(save_path)
-    rerun_export_dir = out_dirs["out_point_dir"] / "rerun_export"
+    rerun_export_dir = out_dirs["rerun_export_dir"]
     rerun_export_dir.mkdir(parents=True, exist_ok=True)
 
     tracks_serial = []
@@ -328,7 +316,7 @@ def save_tracker_outputs(
         - track_names.json to meta_outputs/<run>
         - filtered masks to filtered_outputs/<run>
         - per-frame point clouds to point_outputs/<run>
-        - minimal rerun export to point_outputs/<run>/rerun_export
+        - minimal rerun export to rerun_export
     """
     logger.info("Saving tracker outputs to %s", save_path)
     out_dirs = create_output_dirs(save_path)

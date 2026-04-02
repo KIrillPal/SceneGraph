@@ -23,7 +23,11 @@ parser.add_argument("image_folder", type=str, help="Path to folder with images")
 parser.add_argument("sam3_tracks", type=str, help="Path to folder with sam3 tracks")
 parser.add_argument("sam3_embeds", type=str, help="Path to folder with sam3 embeddings")
 parser.add_argument("da3_outputs", type=str, help="Path to folder with da3 outputs")
-parser.add_argument("save_path", type=str, help="Path of where to save outputs")
+parser.add_argument(
+    "save_path",
+    type=str,
+    help="Base output directory for one run, e.g. data/0/tracker_outputs",
+)
 args = parser.parse_args()      
 
 logger.info("Getting images, tracks, and frame embeddings")

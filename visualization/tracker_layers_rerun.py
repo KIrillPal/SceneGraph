@@ -52,12 +52,15 @@ ENTITY_SCENE = "world/scene_frame"
 ENTITY_TRACKS = "world/track_points"
 ENTITY_TRACK_VOXELS = "world/track_voxels_merged"
 ENTITY_TRACK_LABELS = "world/track_labels"
+ENTITY_IMAGE_ROOT = "image"
+ENTITY_MASKED_IMAGE = "image/masked"
 DEFAULT_CONFIG = {
     "fps": 5.0,
     "scene_sub": 2,
     "track_sub": 1,
     "track_voxels_sub": 1,
     "track_voxels_radius": 0.004,
+    "mask_alpha": 0.3,
 }
 
 DESCRIPTION = """
@@ -70,6 +73,7 @@ DESCRIPTION = """
 | `world/track_points` | Track point clouds reconstructed from masks |
 | `world/track_voxels_merged` | Saved merged voxel clouds per track |
 | `world/track_labels` | Track ids at 3D centroids |
+| `image/masked` | Image with track masks overlaid |
 """.strip()
 
 
@@ -223,6 +227,7 @@ def _build_blueprint():
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(name="3D", origin="world"),
+            rrb.Spatial2DView(name="Masked Image", origin=ENTITY_IMAGE_ROOT),
             rrb.TextDocumentView(name="Info", origin="description"),
         )
     )
@@ -232,6 +237,9 @@ def _resolve_export_dir(path: Path) -> Path:
     if path.name == "rerun_export":
         return path
     candidate = path / "rerun_export"
+    if candidate.is_dir():
+        return candidate
+    candidate = path / "point_outputs" / "rerun_export"
     if candidate.is_dir():
         return candidate
     return path
@@ -318,6 +326,27 @@ def _log_points(
     rr.log(entity, rr.Points3D(positions=pts, colors=cols, radii=radius), static=static)
 
 
+def _render_masked_image(
+    frame_idx: int,
+    image: np.ndarray,
+    all_tracks: list[TrackLike],
+    track_colors: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    overlay = np.zeros_like(image)
+    h, w = image.shape[:2]
+    for j, track in enumerate(all_tracks):
+        if frame_idx not in track.masks:
+            continue
+        mask = np.asarray(track.masks[frame_idx]).astype(np.uint8)
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        mask = mask > 0
+        color = (np.asarray(track_colors[j], dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
+        overlay[mask] = color
+    return cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0.0)
+
+
 def _log_track_id_labels(
     clouds: list[tuple[int, np.ndarray]],
     track_colors: np.ndarray,
@@ -365,6 +394,7 @@ def run_from_export(
     track_sub: Optional[int],
     track_voxels_sub: Optional[int],
     track_voxels_radius: Optional[float],
+    mask_alpha: Optional[float],
 ) -> None:
     export_dir = _resolve_export_dir(export_dir.resolve())
     required_files = (
@@ -388,6 +418,8 @@ def run_from_export(
         cfg["track_voxels_sub"] = track_voxels_sub
     if track_voxels_radius is not None:
         cfg["track_voxels_radius"] = track_voxels_radius
+    if mask_alpha is not None:
+        cfg["mask_alpha"] = mask_alpha
 
     if cfg["depth_dir"] is None:
         raise FileNotFoundError(
@@ -435,6 +467,16 @@ def run_from_export(
         c2w = extr[i]
         w2c = np.linalg.inv(c2w)[:3, :]
         _log_camera_transform(w2c, intrinsics_i, resolution_wh)
+
+        masked_image = _render_masked_image(
+            i,
+            image_i,
+            all_tracks,
+            track_colors,
+            alpha=float(cfg["mask_alpha"]),
+        )
+        print(masked_image)
+        rr.log(ENTITY_MASKED_IMAGE, rr.Image(masked_image, color_model="bgr"))
 
         mask = points_per_frame_masks[i]
         scene_pts = points_per_frame[i]
@@ -528,6 +570,7 @@ def main() -> None:
     parser.add_argument("--track-sub", type=int, default=None)
     parser.add_argument("--track-voxels-sub", type=int, default=None)
     parser.add_argument("--track-voxels-radius", type=float, default=None)
+    parser.add_argument("--mask-alpha", type=float, default=None)
     rr.script_add_args(parser)
     args = parser.parse_args()
 
@@ -544,6 +587,7 @@ def main() -> None:
         track_sub=args.track_sub,
         track_voxels_sub=args.track_voxels_sub,
         track_voxels_radius=args.track_voxels_radius,
+        mask_alpha=args.mask_alpha,
     )
 
 
