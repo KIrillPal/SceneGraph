@@ -1,4 +1,5 @@
 # SceneGraph
+
 Knowledge-graph-based approach for spatial reasoning for static and dynamic scenes.
 
 ![demo](examples/images/demo.gif)
@@ -52,7 +53,7 @@ Detailed tracker notes are in [static/README.md](static/README.md).
 python static/run_tracker.py \
   <image_folder> \
   <sam3_output_dir>/tracks \
-  <sam3_output_dir> \
+  <sam3_output_dir>/embeds \
   <da3_output_dir> \
   <tracker_output_dir>
 ```
