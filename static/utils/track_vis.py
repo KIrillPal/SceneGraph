@@ -5,10 +5,14 @@ Provides track visualization, color generation, and class label extraction.
 """
 
 import cv2
+import logging
 import numpy as np
 from skimage.measure import label, regionprops
 import distinctipy
 from typing import List, Dict, Tuple, Any
+from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_tracks(tracker) -> List[Any]:
@@ -51,11 +55,17 @@ def visualize_tracks(
         - Uses distinctipy for unique color generation
         - Each track gets a consistent color across all frames
     """
+    logger.info("Visualizing tracks in %s mode", vis_type)
     # Generate unique colors for each track
     colors = (np.array(distinctipy.get_colors(len(all_tracks))) * 255).astype(np.uint8)
     vis_images = []
 
-    for i in range(len(images)):
+    for i in tqdm(
+        range(len(images)),
+        desc=f"Visualizing {vis_type}",
+        unit="frame",
+        dynamic_ncols=True,
+    ):
         if vis_type == "mask":
             # Overlay colored masks
             all_mask = np.zeros_like(images[i])

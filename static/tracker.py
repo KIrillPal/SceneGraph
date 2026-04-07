@@ -201,7 +201,7 @@ class Track:
             detection: New detection dict.
             frame_idx: Current frame index.
         """
-        print(detection["cls"], self.id)
+        # print(detection["cls"], self.id)
         points = detection["points"]
 
         # Compute IoA for update decision

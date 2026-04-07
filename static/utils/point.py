@@ -1,10 +1,14 @@
 import cv2
+import logging
 import torch
 import numpy as np
 import os
 import open3d as o3d
 from scipy.spatial import cKDTree
 import numpy as np
+from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def statistical_outlier_removal(
@@ -122,6 +126,7 @@ def get_da3_pointclouds(depth_dir, extrinsics_file, N, conf_thresh_mul=0.5):
         - Confidence threshold = conf_thresh_nul * mean(conf)
         - Statistical outlier removal applied after projection
     """
+    logger.info("Getting DA3 point clouds from %s", depth_dir)
     extrinsics = []
     # pose extraction
     with open(extrinsics_file, "r") as f:
@@ -132,8 +137,14 @@ def get_da3_pointclouds(depth_dir, extrinsics_file, N, conf_thresh_mul=0.5):
         extrinsics.append(pose_np)
     points_per_frame = []
     points_per_frame_masks = []
-    for i in range(N):
-        data = np.load(depth_dir + "frame_%d.npz" % (i))
+    for i in tqdm(
+        range(N),
+        desc="Building DA3 point clouds",
+        unit="frame",
+        dynamic_ncols=True,
+    ):
+        frame_file = os.path.join(depth_dir, f"frame_{i}.npz")
+        data = np.load(frame_file)
         image = data["image"]  # [H, W, 3] uint8
         depth = data["depth"]  # [H, W] float32
         h, w = depth.shape
