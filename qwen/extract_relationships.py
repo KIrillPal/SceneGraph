@@ -195,7 +195,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3.5-2B",
+        default="Qwen/Qwen3.5-27B",
         help="Model name exposed by the Qwen server.",
     )
     parser.add_argument(

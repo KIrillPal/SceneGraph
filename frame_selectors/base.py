@@ -79,10 +79,12 @@ class BaseSelector(ABC):
         frame_sample_iter: Iterator[FrameSample],
         output_dir: str | Path,
     ) -> dict[str, Path]:
-        """Save selected frames with track-id marks and export JSON metadata."""
+        """Save selected frames, marked copies, and JSON metadata."""
         output_dir = Path(output_dir)
         marked_frames_dir = output_dir / "marked_frames"
+        unmarked_frames_dir = output_dir / "unmarked_frames"
         marked_frames_dir.mkdir(parents=True, exist_ok=True)
+        unmarked_frames_dir.mkdir(parents=True, exist_ok=True)
 
         target_frame_ids = {int(frame_id) for frame_id in frame_ids}
         if not target_frame_ids:
@@ -91,6 +93,7 @@ class BaseSelector(ABC):
                 json.dump({"frames": []}, f, indent=2)
             return {
                 "marked_frames_dir": marked_frames_dir,
+                "unmarked_frames_dir": unmarked_frames_dir,
                 "metadata_path": metadata_path,
             }
 
@@ -133,6 +136,12 @@ class BaseSelector(ABC):
             if not cv2.imwrite(str(image_path), marked_image):
                 raise ValueError(f"Failed to save marked frame: {image_path}")
 
+            unmarked_image_path = unmarked_frames_dir / f"frame_{frame_idx:04d}.png"
+            if not cv2.imwrite(str(unmarked_image_path), image):
+                raise ValueError(
+                    f"Failed to save unmarked frame: {unmarked_image_path}"
+                )
+
             metadata_frames.append(
                 {
                     "frame_id": int(frame_idx),
@@ -158,6 +167,7 @@ class BaseSelector(ABC):
 
         return {
             "marked_frames_dir": marked_frames_dir,
+            "unmarked_frames_dir": unmarked_frames_dir,
             "metadata_path": metadata_path,
         }
 
