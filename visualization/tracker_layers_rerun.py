@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Build tracker_layers .rrd from the export saved by run_tracker.py.
-
-This script follows the same visualization logic as the notebook path:
-  - camera pose + pinhole per frame
-  - scene points per frame colored from DA3 RGB images
-  - track points per frame reconstructed from saved masks
-  - merged voxel clouds per track from saved voxel history
-  - track id labels in 3D
+Build tracker_layers .rrd from the per-frame tracker export saved by run_tracker.py.
 
 Expected export directory content:
-  - tracks.pkl
-  - extrinsics.npy
-  - points_per_frame.pkl
-  - points_per_frame_masks.pkl
+  - frame_000000.npz
+  - frame_000001.npz
+  - ...
+
+Each frame NPZ contains:
+  - frame_id
+  - image
+  - masks
+  - embeddings
+  - point_cloud
+  - intrinsic
+  - extrinsic
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import pickle
 from pathlib import Path
-from typing import Any, Optional
+import re
+from typing import Optional
 
 import cv2
 import distinctipy
 import numpy as np
-import open3d as o3d
 import rerun as rr
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
@@ -58,47 +58,57 @@ DEFAULT_CONFIG = {
     "fps": 5.0,
     "scene_sub": 2,
     "track_sub": 1,
+    "track_radius": 0.004,
     "track_voxels_sub": 1,
     "track_voxels_radius": 0.004,
     "mask_alpha": 0.3,
 }
-
 DESCRIPTION = """
-# 3D tracker — Rerun
+# 3D tracker - Rerun
 
 | Entity | Content |
 |--------|---------|
 | `world/camera` | Camera pose + pinhole |
 | `world/scene_frame` | Scene point cloud for the current frame |
 | `world/track_points` | Track point clouds reconstructed from masks |
-| `world/track_voxels_merged` | Saved merged voxel clouds per track |
+| `world/track_voxels_merged` | Accumulated track geometry rebuilt over time |
 | `world/track_labels` | Track ids at 3D centroids |
 | `image/masked` | Image with track masks overlaid |
 """.strip()
 
-
-class TrackLike:
-    def __init__(
-        self,
-        track_id: int,
-        masks: dict[int, np.ndarray],
-        voxels_by_frame: Optional[dict[int, np.ndarray]] = None,
-    ) -> None:
-        self.id = track_id
-        self.masks = masks
-        self.voxels_by_frame = voxels_by_frame or {}
+_INDEX_RE = re.compile(r"(\d+)(?!.*\d)")
 
 
-def _make_track_color_map(all_tracks: list[TrackLike]) -> dict[int, np.ndarray]:
-    colors = distinctipy.get_colors(len(all_tracks))
-    return {
-        int(track.id): (np.asarray(color, dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
-        for track, color in zip(all_tracks, colors)
-    }
+class OnlineVoxelMap:
+    """Lightweight voxel accumulator used to rebuild merged track geometry."""
 
+    def __init__(self, voxel_size: float = 0.01, alpha: float = 0.3):
+        self.voxel_size = voxel_size
+        self.alpha = alpha
+        self.voxels: dict[tuple[int, int, int], np.ndarray] = {}
 
-def _rgb_to_bgr(color: np.ndarray) -> np.ndarray:
-    return np.asarray(color, dtype=np.uint8)[::-1]
+    def add_points(self, points: np.ndarray) -> None:
+        if len(points) == 0:
+            return
+
+        points = np.asarray(points, dtype=np.float32)
+        indices = np.floor(points / self.voxel_size).astype(np.int32)
+        for idx, point in zip(indices, points):
+            key = (int(idx[0]), int(idx[1]), int(idx[2]))
+            if key in self.voxels:
+                self.voxels[key] = (1.0 - self.alpha) * self.voxels[
+                    key
+                ] + self.alpha * point
+            else:
+                self.voxels[key] = point.copy()
+
+    def get_points(self) -> np.ndarray:
+        if not self.voxels:
+            return np.zeros((0, 3), dtype=np.float32)
+
+        points = np.stack(list(self.voxels.values()), axis=0).astype(np.float32)
+        points, _ = statistical_outlier_removal(points)
+        return np.asarray(points, dtype=np.float32)
 
 
 def statistical_outlier_removal(
@@ -117,7 +127,9 @@ def statistical_outlier_removal(
     return points[mask], mask
 
 
-def adaptive_erode_mask_area(mask: np.ndarray, target_area_ratio: float = 0.85) -> np.ndarray:
+def adaptive_erode_mask_area(
+    mask: np.ndarray, target_area_ratio: float = 0.85
+) -> np.ndarray:
     if mask.max() <= 1.0:
         mask = (mask * 255).astype(np.uint8)
     original_area = cv2.countNonZero(mask)
@@ -125,7 +137,9 @@ def adaptive_erode_mask_area(mask: np.ndarray, target_area_ratio: float = 0.85) 
         return mask
     kernel_size = 3
     while kernel_size <= 7:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
         eroded = cv2.erode(mask, kernel, iterations=1)
         current_area = cv2.countNonZero(eroded)
         if current_area / original_area >= target_area_ratio:
@@ -145,92 +159,6 @@ def safe_erode(mask: np.ndarray, min_area_after: int = 32) -> np.ndarray:
     return eroded
 
 
-def get_obj_point_cloud(
-    points: np.ndarray,
-    clean_mask: np.ndarray,
-    mask: np.ndarray,
-    h: int = 378,
-    w: int = 504,
-) -> np.ndarray:
-    mask_r = cv2.resize(mask.astype(np.uint8), (w, h))
-    eroded_mask = safe_erode(mask_r)
-    mask_r = eroded_mask.flatten()[clean_mask]
-    pts_mask = points[mask_r > 0]
-    pts_mask, _ = statistical_outlier_removal(pts_mask)
-    return pts_mask
-
-
-def track_point_clouds_at_frame(
-    frame_idx: int,
-    all_tracks: list[TrackLike],
-    points_per_frame: list[np.ndarray],
-    points_per_frame_masks: list[np.ndarray],
-    h: int,
-    w: int,
-) -> list[tuple[int, np.ndarray]]:
-    clouds: list[tuple[int, np.ndarray]] = []
-    for track in all_tracks:
-        if frame_idx not in track.masks:
-            continue
-        pts = get_obj_point_cloud(
-            points_per_frame[frame_idx],
-            points_per_frame_masks[frame_idx],
-            track.masks[frame_idx],
-            h,
-            w,
-        )
-        if len(pts) == 0:
-            continue
-        clouds.append((track.id, pts))
-    return clouds
-
-
-def tracks_to_merged_open3d_pcd(
-    frame_idx: int,
-    all_tracks: list[TrackLike],
-    points_per_frame: list[np.ndarray],
-    points_per_frame_masks: list[np.ndarray],
-    h: int,
-    w: int,
-    track_colors: dict[int, np.ndarray],
-    clouds: Optional[list[tuple[int, np.ndarray]]] = None,
-) -> o3d.geometry.PointCloud:
-    if clouds is None:
-        clouds = track_point_clouds_at_frame(
-            frame_idx, all_tracks, points_per_frame, points_per_frame_masks, h, w
-        )
-    merged = o3d.geometry.PointCloud()
-    if not clouds:
-        return merged
-    parts: list[np.ndarray] = []
-    cols: list[np.ndarray] = []
-    for tid, pts in clouds:
-        c = np.asarray(track_colors[tid], dtype=np.float64) / 255.0
-        parts.append(pts)
-        cols.append(np.tile(c, (len(pts), 1)))
-    all_pts = np.vstack(parts)
-    all_cols = np.vstack(cols)
-    merged.points = o3d.utility.Vector3dVector(all_pts)
-    merged.colors = o3d.utility.Vector3dVector(all_cols)
-    return merged
-
-
-def merged_track_voxels_at_frame(
-    frame_idx: int,
-    all_tracks: list[TrackLike],
-) -> list[tuple[int, np.ndarray]]:
-    merged_clouds: list[tuple[int, np.ndarray]] = []
-    for track in all_tracks:
-        pts = track.voxels_by_frame.get(frame_idx)
-        if pts is None:
-            continue
-        pts = np.asarray(pts, dtype=np.float32)
-        if len(pts) == 0:
-            continue
-        merged_clouds.append((track.id, pts))
-    return merged_clouds
-
-
 def _build_blueprint():
     if rrb is None:
         return None
@@ -243,62 +171,160 @@ def _build_blueprint():
     )
 
 
+def _sort_key(path: Path) -> tuple[int, int | str]:
+    match = _INDEX_RE.search(path.stem)
+    if match is None:
+        return (1, path.stem)
+    return (0, int(match.group(1)))
+
+
 def _resolve_export_dir(path: Path) -> Path:
-    if path.name == "rerun_export":
+    if path.is_dir() and list(path.glob("frame_*.npz")):
         return path
-    candidate = path / "rerun_export"
-    if candidate.is_dir():
+    candidate = path / "tracker_outputs"
+    if candidate.is_dir() and list(candidate.glob("frame_*.npz")):
         return candidate
-    candidate = path / "point_outputs" / "rerun_export"
-    if candidate.is_dir():
-        return candidate
-    return path
+    raise FileNotFoundError(f"Could not find frame_*.npz export in {path}")
 
 
-def _load_pickle(path: Path) -> Any:
-    with path.open("rb") as f:
-        return pickle.load(f)
+def _get_frame_paths(export_dir: Path) -> list[Path]:
+    frame_paths = sorted(export_dir.glob("frame_*.npz"), key=_sort_key)
+    if not frame_paths:
+        raise FileNotFoundError(f"No frame_*.npz files found in {export_dir}")
+    return frame_paths
 
 
-def _load_tracks_pickle(path: Path) -> list[TrackLike]:
-    raw: list[dict[str, Any]] = _load_pickle(path)
-    out: list[TrackLike] = []
-    for item in raw:
-        masks = {int(k): v for k, v in item["masks"].items()}
-        voxels_by_frame = {
-            int(k): np.asarray(v, dtype=np.float32)
-            for k, v in item.get("voxels_by_frame", {}).items()
+def _load_object_dict(
+    raw_obj: np.ndarray | dict | None, value_dtype: np.dtype
+) -> dict[str, dict[int, np.ndarray]]:
+    if raw_obj is None:
+        return {}
+    if isinstance(raw_obj, np.ndarray) and raw_obj.dtype == object:
+        raw_obj = raw_obj.item()
+    if raw_obj is None:
+        return {}
+
+    out: dict[str, dict[int, np.ndarray]] = {}
+    for class_name, track_map in dict(raw_obj).items():
+        out[str(class_name)] = {
+            int(track_id): np.asarray(value, dtype=value_dtype)
+            for track_id, value in dict(track_map).items()
         }
-        out.append(TrackLike(int(item["id"]), masks, voxels_by_frame))
     return out
 
 
-def _find_dataset_root(export_dir: Path) -> Optional[Path]:
-    for parent in export_dir.parents:
-        if (parent / "da3_outputs").is_dir():
-            return parent
-    return None
+def _load_frame_payload(frame_path: Path) -> dict[str, object]:
+    with np.load(frame_path, allow_pickle=True) as data:
+        frame_id = (
+            int(data["frame_id"])
+            if "frame_id" in data.files
+            else int(_sort_key(frame_path)[1])
+        )
+        return {
+            "frame_id": frame_id,
+            "image": np.asarray(data["image"]),
+            "masks": _load_object_dict(data["masks"], np.bool_),
+            "point_cloud": np.asarray(data["point_cloud"], dtype=np.float32),
+            "intrinsic": np.asarray(data["intrinsic"], dtype=np.float32),
+            "extrinsic": np.asarray(data["extrinsic"], dtype=np.float32),
+        }
 
 
-def _infer_runtime_config(
-    export_dir: Path,
-) -> dict[str, Any]:
-    cfg = dict(DEFAULT_CONFIG)
-    dataset_root = _find_dataset_root(export_dir)
+def _collect_track_ids(frame_paths: list[Path]) -> list[int]:
+    track_ids: set[int] = set()
+    for frame_path in frame_paths:
+        payload = _load_frame_payload(frame_path)
+        masks = payload["masks"]
+        for track_map in masks.values():
+            track_ids.update(int(track_id) for track_id in track_map)
+    return sorted(track_ids)
 
-    if dataset_root is not None:
-        cfg["depth_dir"] = dataset_root / "da3_outputs" / "results_output"
-    else:
-        cfg["depth_dir"] = None
-    cfg["dataset_root"] = dataset_root
-    return cfg
+
+def _make_track_color_map(track_ids: list[int]) -> dict[int, np.ndarray]:
+    colors = distinctipy.get_colors(len(track_ids))
+    return {
+        track_id: (np.asarray(color, dtype=np.float64) * 255.0)
+        .clip(0, 255)
+        .astype(np.uint8)
+        for track_id, color in zip(track_ids, colors)
+    }
+
+
+def _rgb_to_bgr(color: np.ndarray) -> np.ndarray:
+    return np.asarray(color, dtype=np.uint8)[::-1]
+
+
+def _resize_mask(mask: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
+    height, width = image_size
+    if mask.shape[:2] == (height, width):
+        return np.asarray(mask, dtype=bool)
+    resized = cv2.resize(
+        mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST
+    )
+    return resized > 0
+
+
+def _render_masked_image(
+    image: np.ndarray,
+    masks: dict[str, dict[int, np.ndarray]],
+    track_colors: dict[int, np.ndarray],
+    alpha: float,
+) -> np.ndarray:
+    overlay = np.zeros_like(image)
+    h, w = image.shape[:2]
+    for track_map in masks.values():
+        for track_id, mask in track_map.items():
+            resized_mask = _resize_mask(mask, (h, w))
+            overlay[resized_mask] = _rgb_to_bgr(track_colors[int(track_id)])
+    return cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0.0)
+
+
+def _extract_scene_points(
+    image: np.ndarray, point_cloud: np.ndarray
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    valid_mask = np.isfinite(point_cloud).all(axis=2)
+    if not np.any(valid_mask):
+        return np.zeros((0, 3), dtype=np.float32), None
+
+    points = point_cloud[valid_mask].astype(np.float32)
+    h_pc, w_pc = point_cloud.shape[:2]
+    image_resized = cv2.resize(image, (w_pc, h_pc), interpolation=cv2.INTER_LINEAR)
+    image_rgb = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
+    colors = image_rgb[valid_mask].astype(np.uint8)
+    return points, colors
+
+
+def _extract_track_clouds(
+    masks: dict[str, dict[int, np.ndarray]],
+    point_cloud: np.ndarray,
+) -> list[tuple[int, np.ndarray]]:
+    clouds: list[tuple[int, np.ndarray]] = []
+    h_pc, w_pc = point_cloud.shape[:2]
+    valid_points = np.isfinite(point_cloud).all(axis=2)
+
+    for track_map in masks.values():
+        for track_id, mask in track_map.items():
+            resized_mask = cv2.resize(
+                mask.astype(np.uint8),
+                (w_pc, h_pc),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            eroded_mask = safe_erode(resized_mask)
+            object_mask = valid_points & (eroded_mask > 0)
+            points = point_cloud[object_mask]
+            points, _ = statistical_outlier_removal(points)
+            if len(points) == 0:
+                continue
+            clouds.append((int(track_id), np.asarray(points, dtype=np.float32)))
+    return clouds
 
 
 def _log_camera_transform(
-    extrinsic_w2c: np.ndarray,
+    extrinsic_c2w: np.ndarray,
     intrinsic: np.ndarray,
     resolution_wh: tuple[int, int],
 ) -> None:
+    extrinsic_w2c = np.linalg.inv(extrinsic_c2w)[:3, :]
     rotation = Rotation.from_matrix(extrinsic_w2c[:3, :3])
     rr.log(
         CAMERA_ENTITY,
@@ -326,38 +352,24 @@ def _log_points(
     radius: float = 0.005,
 ) -> None:
     if len(positions) == 0:
-        rr.log(entity, rr.Points3D(positions=np.zeros((0, 3), dtype=np.float32)), static=static)
+        rr.log(
+            entity,
+            rr.Points3D(positions=np.zeros((0, 3), dtype=np.float32)),
+            static=static,
+        )
         return
     pts = np.asarray(positions, dtype=np.float32)[::subsample]
-    cols = np.asarray(colors_u8, dtype=np.uint8)[::subsample] if colors_u8 is not None else None
+    cols = (
+        np.asarray(colors_u8, dtype=np.uint8)[::subsample]
+        if colors_u8 is not None
+        else None
+    )
     rr.log(entity, rr.Points3D(positions=pts, colors=cols, radii=radius), static=static)
-
-
-def _render_masked_image(
-    frame_idx: int,
-    image: np.ndarray,
-    all_tracks: list[TrackLike],
-    track_colors: dict[int, np.ndarray],
-    alpha: float,
-) -> np.ndarray:
-    overlay = np.zeros_like(image)
-    h, w = image.shape[:2]
-    for j, track in enumerate(all_tracks):
-        if frame_idx not in track.masks:
-            continue
-        mask = np.asarray(track.masks[frame_idx]).astype(np.uint8)
-        if mask.shape[:2] != (h, w):
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        mask = mask > 0
-        color = _rgb_to_bgr(track_colors[int(track.id)])
-        overlay[mask] = color
-    return cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0.0)
 
 
 def _log_track_id_labels(
     clouds: list[tuple[int, np.ndarray]],
     track_colors: dict[int, np.ndarray],
-    all_tracks: list[TrackLike],
     label_radius: float = 0.02,
 ) -> None:
     if not clouds:
@@ -371,10 +383,10 @@ def _log_track_id_labels(
     centers: list[np.ndarray] = []
     labels: list[str] = []
     colors_rgb: list[np.ndarray] = []
-    for tid, pts in clouds:
-        centers.append(np.mean(pts, axis=0))
-        labels.append(str(tid))
-        colors_rgb.append(track_colors[tid])
+    for track_id, points in clouds:
+        centers.append(np.mean(points, axis=0))
+        labels.append(str(track_id))
+        colors_rgb.append(track_colors[int(track_id)])
     rr.log(
         ENTITY_TRACK_LABELS,
         rr.Points3D(
@@ -388,45 +400,48 @@ def _log_track_id_labels(
     )
 
 
-def run_from_export(
-    export_dir: Path,
-    rr_args: argparse.Namespace,
+def _merge_track_clouds(
+    clouds: list[tuple[int, np.ndarray]],
+    track_colors: dict[int, np.ndarray],
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    if not clouds:
+        return np.zeros((0, 3), dtype=np.float32), None
+
+    all_points: list[np.ndarray] = []
+    all_colors: list[np.ndarray] = []
+    for track_id, points in clouds:
+        all_points.append(points)
+        all_colors.append(np.tile(track_colors[int(track_id)], (len(points), 1)))
+    return np.vstack(all_points), np.vstack(all_colors)
+
+
+def _update_track_voxel_maps(
+    track_clouds: list[tuple[int, np.ndarray]],
+    voxel_maps: dict[int, OnlineVoxelMap],
 ) -> None:
+    for track_id, points in track_clouds:
+        voxel_map = voxel_maps.setdefault(int(track_id), OnlineVoxelMap())
+        voxel_map.add_points(points)
+
+
+def _merge_track_voxel_clouds(
+    voxel_maps: dict[int, OnlineVoxelMap],
+    track_colors: dict[int, np.ndarray],
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    voxel_clouds: list[tuple[int, np.ndarray]] = []
+    for track_id in sorted(voxel_maps):
+        points = voxel_maps[track_id].get_points()
+        if len(points) == 0:
+            continue
+        voxel_clouds.append((track_id, points))
+    return _merge_track_clouds(voxel_clouds, track_colors)
+
+
+def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
     export_dir = _resolve_export_dir(export_dir.resolve())
-    required_files = (
-        export_dir / "tracks.pkl",
-        export_dir / "extrinsics.npy",
-        export_dir / "points_per_frame.pkl",
-        export_dir / "points_per_frame_masks.pkl",
-    )
-    missing = [str(path) for path in required_files if not path.is_file()]
-    if missing:
-        raise FileNotFoundError("Missing export files:\n" + "\n".join(missing))
-
-    cfg = _infer_runtime_config(export_dir)
-
-    if cfg["depth_dir"] is None:
-        raise FileNotFoundError(
-            "Could not infer depth directory from export path. "
-            "Pass --depth-dir explicitly."
-        )
-
-    depth_dir = Path(cfg["depth_dir"])
-    if not depth_dir.is_dir():
-        raise FileNotFoundError(f"Depth directory does not exist: {depth_dir}")
-
-    logger.info("Loading tracker export from %s", export_dir)
-    logger.info("Using depth frames from %s", depth_dir)
-
-    extr = np.load(export_dir / "extrinsics.npy")
-    with (export_dir / "points_per_frame.pkl").open("rb") as f:
-        points_per_frame: list[np.ndarray] = pickle.load(f)
-    with (export_dir / "points_per_frame_masks.pkl").open("rb") as f:
-        points_per_frame_masks: list[np.ndarray] = pickle.load(f)
-    all_tracks = _load_tracks_pickle(export_dir / "tracks.pkl")
-    track_colors = _make_track_color_map(all_tracks)
-
-    n_frames = min(len(extr), len(points_per_frame), len(points_per_frame_masks))
+    frame_paths = _get_frame_paths(export_dir)
+    track_colors = _make_track_color_map(_collect_track_ids(frame_paths))
+    voxel_maps: dict[int, OnlineVoxelMap] = {}
 
     rr.script_setup(rr_args, "3d_tracker_rrd")
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
@@ -437,28 +452,28 @@ def run_from_export(
     )
     blueprint_sent = False
 
-    for i in tqdm(range(n_frames), desc="Writing Rerun frames", unit="frame", dynamic_ncols=True):
-        rr.set_time_sequence("frame", i)
-        rr.set_time_seconds("time", i / float(cfg["fps"]))
+    for frame_path in tqdm(
+        frame_paths, desc="Writing Rerun frames", unit="frame", dynamic_ncols=True
+    ):
+        payload = _load_frame_payload(frame_path)
+        frame_id = int(payload["frame_id"])
+        image = np.asarray(payload["image"])
+        masks = payload["masks"]
+        point_cloud = np.asarray(payload["point_cloud"], dtype=np.float32)
+        intrinsic = np.asarray(payload["intrinsic"], dtype=np.float32)
+        extrinsic = np.asarray(payload["extrinsic"], dtype=np.float32)
 
-        frame_file = depth_dir / f"frame_{i}.npz"
-        data = np.load(frame_file)
-        depth_i = data["depth"]
-        intrinsics_i = data["intrinsics"]
-        image_i = data["image"]
-        hi, wi = int(depth_i.shape[0]), int(depth_i.shape[1])
-        resolution_wh = (wi, hi)
+        rr.set_time_sequence("frame", frame_id)
+        rr.set_time_seconds("time", frame_id / float(DEFAULT_CONFIG["fps"]))
 
-        c2w = extr[i]
-        w2c = np.linalg.inv(c2w)[:3, :]
-        _log_camera_transform(w2c, intrinsics_i, resolution_wh)
+        h_pc, w_pc = point_cloud.shape[:2]
+        _log_camera_transform(extrinsic, intrinsic, (w_pc, h_pc))
 
         masked_image = _render_masked_image(
-            i,
-            image_i,
-            all_tracks,
+            image,
+            masks,
             track_colors,
-            alpha=float(cfg["mask_alpha"]),
+            alpha=float(DEFAULT_CONFIG["mask_alpha"]),
         )
         rr.log(ENTITY_MASKED_IMAGE, rr.Image(masked_image, color_model="bgr"))
         if not blueprint_sent:
@@ -467,68 +482,42 @@ def run_from_export(
                 rr.send_blueprint(blueprint, make_active=True, make_default=True)
             blueprint_sent = True
 
-        mask = points_per_frame_masks[i]
-        scene_pts = points_per_frame[i]
-        rgb_flat = image_i.reshape(-1, 3)
-        scene_cols = rgb_flat[mask].astype(np.uint8)
-        _log_points(scene_pts, scene_cols, ENTITY_SCENE, subsample=int(cfg["scene_sub"]), static=False)
-
-        track_clouds = track_point_clouds_at_frame(
-            i,
-            all_tracks,
-            points_per_frame,
-            points_per_frame_masks,
-            hi,
-            wi,
+        scene_points, scene_colors = _extract_scene_points(image, point_cloud)
+        _log_points(
+            scene_points,
+            scene_colors,
+            ENTITY_SCENE,
+            subsample=int(DEFAULT_CONFIG["scene_sub"]),
+            static=False,
         )
-        _log_track_id_labels(track_clouds, track_colors, all_tracks)
 
-        pcd_tr = tracks_to_merged_open3d_pcd(
-            i,
-            all_tracks,
-            points_per_frame,
-            points_per_frame_masks,
-            hi,
-            wi,
-            track_colors=track_colors,
-            clouds=track_clouds,
+        track_clouds = _extract_track_clouds(masks, point_cloud)
+        _log_track_id_labels(track_clouds, track_colors)
+        track_points, track_point_colors = _merge_track_clouds(
+            track_clouds, track_colors
         )
-        tr_pts = np.asarray(pcd_tr.points)
-        tr_cols = np.asarray(pcd_tr.colors)
-        tr_cols_u8 = (
-            (tr_cols * 255.0).clip(0, 255).astype(np.uint8)
-            if len(tr_pts) and tr_cols.size
-            else None
+        _log_points(
+            track_points,
+            track_point_colors,
+            ENTITY_TRACKS,
+            subsample=int(DEFAULT_CONFIG["track_sub"]),
+            static=False,
+            radius=float(DEFAULT_CONFIG["track_radius"]),
         )
-        _log_points(tr_pts, tr_cols_u8, ENTITY_TRACKS, subsample=int(cfg["track_sub"]), static=False)
 
-        merged_voxels_clouds = merged_track_voxels_at_frame(i, all_tracks)
-        if merged_voxels_clouds:
-            mv_parts: list[np.ndarray] = []
-            mv_cols: list[np.ndarray] = []
-            for tid, pts in merged_voxels_clouds:
-                mv_parts.append(pts)
-                c = track_colors[tid]
-                mv_cols.append(np.tile(c, (len(pts), 1)))
-            mv_pts = np.vstack(mv_parts)
-            mv_cols_u8 = np.vstack(mv_cols)
-            _log_points(
-                mv_pts,
-                mv_cols_u8,
-                ENTITY_TRACK_VOXELS,
-                subsample=int(cfg["track_voxels_sub"]),
-                static=False,
-                radius=float(cfg["track_voxels_radius"]),
-            )
-        else:
-            _log_points(
-                np.zeros((0, 3), dtype=np.float32),
-                None,
-                ENTITY_TRACK_VOXELS,
-                subsample=1,
-                static=False,
-                radius=float(cfg["track_voxels_radius"]),
-            )
+        _update_track_voxel_maps(track_clouds, voxel_maps)
+        merged_voxel_points, merged_voxel_colors = _merge_track_voxel_clouds(
+            voxel_maps,
+            track_colors,
+        )
+        _log_points(
+            merged_voxel_points,
+            merged_voxel_colors,
+            ENTITY_TRACK_VOXELS,
+            subsample=int(DEFAULT_CONFIG["track_voxels_sub"]),
+            static=False,
+            radius=float(DEFAULT_CONFIG["track_voxels_radius"]),
+        )
 
     rr.script_teardown(rr_args)
     logger.info("Saved %s", rr_args.save)
@@ -536,13 +525,13 @@ def run_from_export(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build tracker_layers .rrd from run_tracker.py export."
+        description="Build tracker_layers .rrd from run_tracker.py per-frame export."
     )
     parser.add_argument(
         "--export-dir",
         type=Path,
         required=True,
-        help="Path to rerun_export or its parent directory.",
+        help="Path to the tracker output directory with frame_*.npz files.",
     )
     rr.script_add_args(parser)
     args = parser.parse_args()
@@ -551,10 +540,7 @@ def main() -> None:
     if getattr(args, "save", None) is None:
         args.save = str(export_dir / "tracker_layers.rrd")
 
-    run_from_export(
-        export_dir=export_dir,
-        rr_args=args,
-    )
+    run_from_export(export_dir=export_dir, rr_args=args)
 
 
 if __name__ == "__main__":

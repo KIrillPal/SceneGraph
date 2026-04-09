@@ -189,6 +189,9 @@ class Track:
         # Store masks and classes per frame
         self.masks: Dict[int, np.ndarray] = {frame_idx: detection["mask"]}
         self.cls: Dict[int, str] = {frame_idx: detection["cls"]}
+        self.embeddings: Dict[int, np.ndarray] = {
+            frame_idx: np.asarray(detection["embedding"], dtype=np.float32).reshape(-1)
+        }
 
         # Update rules based on IoA
         self.update_rules = SmartUpdateRules()
@@ -240,6 +243,9 @@ class Track:
         self.time_since_update = 0
         self.masks[frame_idx] = detection["mask"]
         self.cls[frame_idx] = detection["cls"]
+        self.embeddings[frame_idx] = np.asarray(
+            detection["embedding"], dtype=np.float32
+        ).reshape(-1)
 
 
 class SmartUpdateRules:

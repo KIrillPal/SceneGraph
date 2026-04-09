@@ -4,10 +4,9 @@ Feature Extraction Utilities for SAM3 Tracker
 Provides text embeddings, visual embeddings, and point cloud generation.
 """
 
-import json
 import logging
 import os
-import pickle
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Tuple, List, Dict, Set
 
@@ -90,83 +89,48 @@ def get_object_embedding(features: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 def get_obj_point_cloud(
     image: np.ndarray,
-    points: np.ndarray,
-    clean_mask: np.ndarray,
+    point_cloud: np.ndarray,
     mask: np.ndarray,
-    h: int = 378,
-    w: int = 504,
 ) -> o3d.geometry.PointCloud:
     """
-    Generate colored 3D point cloud from image, depth points, and masks.
+    Generate a colored 3D point cloud for one object from a dense frame point cloud.
 
-    Combines 2D mask with 3D points, applies outlier removal, and assigns
-    RGB colors from the image to each point.
+    Resizes the 2D mask to the dense point-cloud resolution, keeps only valid
+    3D points inside the mask, applies outlier removal, and colors them from
+    the resized image.
 
     Args:
-        image: RGB image [H, W, 3] for coloring points.
-        points: 3D points [N, 3] in world coordinates.
-        clean_mask: Boolean mask [h*w] for valid pixels.
+        image: BGR image [H, W, 3] for coloring points.
+        point_cloud: Dense 3D points [h, w, 3] in world coordinates.
         mask: Object mask [H, W] to filter points.
-        h: Target height for resizing (default: 378).
-        w: Target width for resizing (default: 504).
 
     Returns:
         pcd: Open3D point cloud with points and colors.
             Returns empty cloud if no valid points remain.
-
-    Notes:
-        - Mask is resized to (w, h) for consistency
-        - Safe erosion applied to remove boundary artifacts
-        - Statistical outlier removal filters noisy 3D points
-        - 2D coordinates (xs, ys) are computed but commented out
     """
-    # Resize image and mask to target resolution
+    h, w = point_cloud.shape[:2]
     image_r = cv2.resize(image, (w, h)).reshape((-1, 3))
-    H, W = mask.shape
-    mask_r = cv2.resize(mask.astype(np.uint8), (w, h))
+    mask_r = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
 
-    # Apply safe erosion to remove boundary artifacts
     eroded_mask = safe_erode(mask_r)
-
-    # Apply clean_mask filter
-    mask_r = eroded_mask.flatten()[clean_mask]
-
-    # Filter 3D points by mask
-    pts_mask = points[mask_r > 0]
-
-    # Remove statistical outliers
+    valid_mask = np.isfinite(point_cloud).all(axis=2) & (eroded_mask > 0)
+    pts_mask = point_cloud[valid_mask]
     pts_last, last_mask = statistical_outlier_removal(pts_mask)
 
-    # Compute 2D pixel coordinates (scaled to original mask size)
-    indices = np.indices((h, w))
-    ys = (indices[0] * H / h).astype(int)
-    xs = (indices[1] * W / w).astype(int)
-
-    # Create Open3D point cloud
     pcd = o3d.geometry.PointCloud()
-
-    # Get 2D coordinates for valid points
-    xs_masked = xs.flatten()[clean_mask][mask_r > 0]
-    ys_masked = ys.flatten()[clean_mask][mask_r > 0]
-
-    # Return empty cloud if no valid points
-    if len(pts_last) == 0 or len(xs_masked) == 0:
+    if len(pts_last) == 0:
         return pcd
 
-    # Assign 3D points
     pcd.points = o3d.utility.Vector3dVector(pts_last)
-
-    # Assign RGB colors (filtered by outlier removal mask)
-    # Note: xs_last, ys_last computation commented out
-    colors = image_r[clean_mask][mask_r > 0][last_mask]
+    colors = image_r[valid_mask.reshape(-1)][last_mask]
     pcd.colors = o3d.utility.Vector3dVector(colors)
 
     return pcd
 
-def read_tracking_data(image_dir: str, 
-                       sam3_tracks_dir: str, 
-                       sam3_embeds_dir: str
-                       ) -> Tuple[List[np.ndarray], Dict[int, Dict], List[np.ndarray]]:
+
+def read_tracking_data(
+    image_dir: str, sam3_tracks_dir: str, sam3_embeds_dir: str
+) -> Tuple[List[np.ndarray], Dict[int, Dict], List[np.ndarray]]:
     frame_names = sorted(os.listdir(image_dir))
     images = []
     logger.info("Getting images from %s", image_dir)
@@ -184,8 +148,10 @@ def read_tracking_data(image_dir: str,
     for i, track_file in enumerate(
         tqdm(track_files, desc="Loading tracks", unit="track", dynamic_ncols=True)
     ):
-        track = np.load(os.path.join(sam3_tracks_dir, track_file), allow_pickle=True)['arr_0']
-        if track.tolist()['cls'] != 0:
+        track = np.load(os.path.join(sam3_tracks_dir, track_file), allow_pickle=True)[
+            "arr_0"
+        ]
+        if track.tolist()["cls"] != 0:
             raw_tracks[i] = track.tolist()
     tracks = merge_masks(raw_tracks)
 
@@ -195,38 +161,11 @@ def read_tracking_data(image_dir: str,
     for i, emb_file in enumerate(
         tqdm(emb_files, desc="Loading embeddings", unit="file", dynamic_ncols=True)
     ):
-        frame_embeds.append(np.load(os.path.join(sam3_embeds_dir, emb_file), allow_pickle=True)['arr_0'])
+        frame_embeds.append(
+            np.load(os.path.join(sam3_embeds_dir, emb_file), allow_pickle=True)["arr_0"]
+        )
 
     return images, tracks, frame_embeds
-
-
-def create_output_dirs(save_path: str | Path) -> Dict[str, Path]:
-    """
-    Create the tracker output directory layout from a single save path.
-
-    Args:
-        save_path: Base directory for one tracker run, e.g.
-            'vis_data/run_2' or 'data/0/tracker_outputs'.
-
-    Returns:
-        Dict with the created output directories.
-    """
-    save_path = Path(save_path)
-
-    out_dirs = {
-        "base_dir": save_path,
-        "out_dir": save_path / "outputs",
-        "track_out_dir": save_path / "track_outputs",
-        "out_meta_dir": save_path / "meta_outputs",
-        "out_filtered_dir": save_path / "filtered_outputs",
-        "out_point_dir": save_path / "point_outputs",
-        "rerun_export_dir": save_path / "rerun_export",
-    }
-
-    for path in out_dirs.values():
-        path.mkdir(parents=True, exist_ok=True)
-
-    return out_dirs
 
 
 def _read_extrinsics(extrinsics_file: str | Path) -> np.ndarray:
@@ -241,128 +180,109 @@ def _read_extrinsics(extrinsics_file: str | Path) -> np.ndarray:
     return np.stack(extrinsics, axis=0)
 
 
-def save_rerun_export(
-    save_path: str | Path,
-    all_tracks: List[Any],
-    track_voxels_history: Dict[int, Dict[int, np.ndarray]],
+def get_da3_frame_data(
+    depth_dir: str | Path,
     extrinsics_file: str | Path,
-    points_per_frame: List[np.ndarray],
-    points_per_frame_masks: List[np.ndarray],
-) -> Path:
-    """
-    Save the minimal rerun export required by the tracker pipeline.
+    num_frames: int,
+    conf_thresh_mul: float = 0.5,
+) -> List[Dict[str, np.ndarray]]:
+    """Load DA3 outputs as dense per-frame point clouds aligned to depth pixels."""
+    depth_dir = Path(depth_dir)
+    extrinsics = _read_extrinsics(extrinsics_file).astype(np.float32)
+    frame_data: List[Dict[str, np.ndarray]] = []
 
-    Saves only:
-        - tracks.pkl
-        - extrinsics.npy
-        - points_per_frame.pkl
-        - points_per_frame_masks.pkl
-    """
-    logger.info("Saving rerun export")
-    out_dirs = create_output_dirs(save_path)
-    rerun_export_dir = out_dirs["rerun_export_dir"]
-    rerun_export_dir.mkdir(parents=True, exist_ok=True)
-
-    tracks_serial = []
-    for track in tqdm(
-        all_tracks,
-        desc="Preparing rerun export",
-        unit="track",
+    logger.info("Getting DA3 frame data from %s", depth_dir)
+    for frame_idx in tqdm(
+        range(num_frames),
+        desc="Loading DA3 frames",
+        unit="frame",
         dynamic_ncols=True,
     ):
-        track_id = int(track.id)
-        voxels_by_frame = {
-            int(frame_idx): np.asarray(points, dtype=np.float32)
-            for frame_idx, points in track_voxels_history.get(track_id, {}).items()
-        }
-        tracks_serial.append(
+        frame_file = depth_dir / f"frame_{frame_idx}.npz"
+        data = np.load(frame_file)
+
+        depth = np.asarray(data["depth"], dtype=np.float32)
+        conf = np.asarray(data["conf"], dtype=np.float32)
+        intrinsic = np.asarray(data["intrinsics"], dtype=np.float32)
+        extrinsic = np.asarray(extrinsics[frame_idx], dtype=np.float32)
+
+        w2c = np.linalg.inv(extrinsic)[:3, :]
+        dense_points = depth_to_point_cloud_vectorized(
+            depth[np.newaxis, :, :],
+            intrinsic[np.newaxis, :, :],
+            w2c[np.newaxis, :, :],
+        )[0].astype(np.float32)
+
+        valid_mask = conf > (float(conf.mean()) * conf_thresh_mul)
+        dense_points[~valid_mask] = np.nan
+
+        frame_data.append(
             {
-                "id": track_id,
-                "masks": {int(k): v for k, v in track.masks.items()},
-                "voxels_by_frame": voxels_by_frame,
+                "point_cloud": dense_points,
+                "intrinsic": intrinsic,
+                "extrinsic": extrinsic,
             }
         )
 
-    with open(rerun_export_dir / "tracks.pkl", "wb") as f:
-        pickle.dump(tracks_serial, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return frame_data
 
-    np.save(rerun_export_dir / "extrinsics.npy", _read_extrinsics(extrinsics_file))
 
-    with open(rerun_export_dir / "points_per_frame.pkl", "wb") as f:
-        pickle.dump(points_per_frame, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    with open(rerun_export_dir / "points_per_frame_masks.pkl", "wb") as f:
-        pickle.dump(points_per_frame_masks, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    return rerun_export_dir
+def _get_track_label(track: Any) -> str:
+    classes = np.asarray(list(track.cls.values()), dtype=object)
+    values, counts = np.unique(classes, return_counts=True)
+    return str(values[np.argmax(counts)])
 
 
 def save_tracker_outputs(
     save_path: str | Path,
-    masked_images: List[np.ndarray],
-    tracks: Dict[int, Dict],
-    points_per_frame: List[np.ndarray],
-    points_per_frame_masks: List[np.ndarray],
     all_tracks: List[Any],
-    track_voxels_history: Dict[int, Dict[int, np.ndarray]],
-    extrinsics_file: str | Path,
-) -> Dict[str, Path]:
-    """
-    Save tracker outputs into the standard output directory layout.
-
-    Saves:
-        - masked images to outputs/<run>
-        - per-track npz files to track_outputs/<run>
-        - track_names.json to meta_outputs/<run>
-        - filtered masks to filtered_outputs/<run>
-        - per-frame point clouds to point_outputs/<run>
-        - minimal rerun export to rerun_export
-    """
+    images: List[np.ndarray],
+    da3_frame_data: List[Dict[str, np.ndarray]],
+) -> Path:
+    """Save one compressed NPZ file per frame keyed by final tracker ids."""
     logger.info("Saving tracker outputs to %s", save_path)
-    out_dirs = create_output_dirs(save_path)
+    save_path = Path(save_path)
+    save_path.mkdir(parents=True, exist_ok=True)
 
-    for i, image in enumerate(
-        tqdm(masked_images, desc="Saving masked images", unit="image", dynamic_ncols=True)
+    track_labels = {int(track.id): _get_track_label(track) for track in all_tracks}
+
+    for frame_idx, image in enumerate(
+        tqdm(images, desc="Saving frame exports", unit="frame", dynamic_ncols=True)
     ):
-        cv2.imwrite(str(out_dirs["out_dir"] / f"{i}.png"), image)
+        masks_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
+        embeddings_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
 
-    for track_id, track_data in tqdm(
-        tracks.items(),
-        desc="Saving track files",
-        unit="track",
-        dynamic_ncols=True,
-        total=len(tracks),
-    ):
-        np.savez(out_dirs["track_out_dir"] / f"{track_id}.npz", track_data, pickle=True)
+        for track in all_tracks:
+            track_id = int(track.id)
+            mask = track.masks.get(frame_idx)
+            if mask is None:
+                continue
 
-    track_names = {int(idx): {"cls": track["cls"]} for idx, track in tracks.items()}
-    with open(out_dirs["out_meta_dir"] / "track_names.json", "w", encoding="utf-8") as f:
-        json.dump(track_names, f, indent=4)
+            class_name = track_labels[track_id]
+            masks_by_class[class_name][track_id] = np.asarray(mask, dtype=bool)
 
-    for i, mask in enumerate(
-        tqdm(
-            points_per_frame_masks,
-            desc="Saving filtered masks",
-            unit="frame",
-            dynamic_ncols=True,
+            embedding = track.embeddings.get(frame_idx)
+            if embedding is not None:
+                embeddings_by_class[class_name][track_id] = np.asarray(
+                    embedding, dtype=np.float32
+                ).reshape(-1)
+
+        frame_file = save_path / f"frame_{frame_idx:06d}.npz"
+        np.savez_compressed(
+            frame_file,
+            frame_id=np.int32(frame_idx),
+            image=np.asarray(image),
+            masks=dict(masks_by_class),
+            embeddings=dict(embeddings_by_class),
+            point_cloud=np.asarray(
+                da3_frame_data[frame_idx]["point_cloud"], dtype=np.float32
+            ),
+            intrinsic=np.asarray(
+                da3_frame_data[frame_idx]["intrinsic"], dtype=np.float32
+            ),
+            extrinsic=np.asarray(
+                da3_frame_data[frame_idx]["extrinsic"], dtype=np.float32
+            ),
         )
-    ):
-        np.save(out_dirs["out_filtered_dir"] / f"{i}_filtered.npy", mask)
 
-    for i, points in enumerate(
-        tqdm(points_per_frame, desc="Saving point clouds", unit="frame", dynamic_ncols=True)
-    ):
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        o3d.io.write_point_cloud(str(out_dirs["out_point_dir"] / f"{i}.ply"), pcd)
-
-    save_rerun_export(
-        save_path,
-        all_tracks,
-        track_voxels_history,
-        extrinsics_file,
-        points_per_frame,
-        points_per_frame_masks,
-    )
-
-    return out_dirs
+    return save_path
