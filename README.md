@@ -10,8 +10,8 @@ The main pipeline is:
 
 1. `SAM3` generates 2D masks/tracks and frame embeddings from the RGB frames.
 2. `Depth-Anything-3` generates depth, intrinsics, and camera poses for the same frames.
-3. The custom `3D tracker` fuses SAM3 and DA3 outputs into object tracks and voxel histories.
-4. `Rerun` visualization builds a `.rrd` file for inspecting the scene, masks, and 3D tracks.
+3. The custom `3D tracker` fuses SAM3 and DA3 outputs into final object tracks.
+4. `Rerun` visualization builds a `.rrd` file for inspecting the scene, masks, current object clouds, and accumulated object geometry.
 
 Expected high-level inputs:
 
@@ -29,7 +29,7 @@ python3 sam3/run_inference.py <image_folder> <objects_txt> <sam3_output_dir>
 This produces:
 
 - `<sam3_output_dir>/tracks`
-- frame embeddings in `<sam3_output_dir>`
+- `<sam3_output_dir>/embeds`
 
 ### 2. Run Depth-Anything-3
 
@@ -58,12 +58,26 @@ python static/run_tracker.py \
   <tracker_output_dir>
 ```
 
-Key tracker outputs:
+Key tracker output:
 
-- `<tracker_output_dir>/outputs`
-- `<tracker_output_dir>/track_outputs`
-- `<tracker_output_dir>/point_outputs`
-- `<tracker_output_dir>/rerun_export`
+- `<tracker_output_dir>/frame_000000.npz`
+- `<tracker_output_dir>/frame_000001.npz`
+- ...
+
+Each frame file stores:
+
+- `frame_id`
+- `image`
+- `masks: dict[str, dict[int, np.ndarray]]`
+- `embeddings: dict[str, dict[int, np.ndarray]]`
+- `point_cloud`
+- `intrinsic`
+- `extrinsic`
+
+Notes:
+
+- object ids are final tracker ids
+- the same export is used by `visualization/tracker_layers_rerun.py` and `frame_selectors/base.py`
 
 ### 4. Build the Visualization
 
@@ -79,5 +93,6 @@ Open the resulting `.rrd` in Rerun to inspect:
 
 - image masks
 - per-frame scene point clouds
-- tracked object point clouds
-- merged voxel clouds and track ids
+- current tracked object point clouds
+- accumulated object geometry rebuilt online from masks and point clouds
+- track ids

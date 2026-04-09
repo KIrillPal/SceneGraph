@@ -22,12 +22,22 @@ python static/run_tracker.py \
 ```
 
 После запуска результаты сохраняются в:
-- `<save_path>/outputs`
-- `<save_path>/track_outputs`
-- `<save_path>/meta_outputs`
-- `<save_path>/filtered_outputs`
-- `<save_path>/point_outputs`
-- `<save_path>/rerun_export`
+- `<save_path>/frame_000000.npz`
+- `<save_path>/frame_000001.npz`
+- ...
+
+Каждый `frame_XXXXXX.npz` содержит:
+- `frame_id`
+- `image`
+- `masks: dict[str, dict[int, np.ndarray]]`
+- `embeddings: dict[str, dict[int, np.ndarray]]`
+- `point_cloud`
+- `intrinsic`
+- `extrinsic`
+
+Важно:
+- id объектов в `masks` и `embeddings` это финальные `track.id` из трекера
+- экспорт теперь один и тот же для визуализации и для `frame_selectors`
 
 Сборка `.rrd` для Rerun:
 
@@ -43,7 +53,7 @@ python visualization/tracker_layers_rerun.py \
 
 `tracker.py` содержит `Track`, `Simple3DTracker`, `VoxelMap` и правила обновления треков.
 
-`utils/data.py` отвечает за загрузку данных, текстовые эмбеддинги и сохранение результатов.
+`utils/data.py` отвечает за загрузку данных, текстовые эмбеддинги и сохранение per-frame экспорта.
 
 `utils/mask.py` содержит эрозию масок и `merge_masks`, который разделяет слепленные объекты через DBSCAN.
 
@@ -51,14 +61,27 @@ python visualization/tracker_layers_rerun.py \
 
 `utils/track_vis.py` делает 2D визуализацию треков поверх кадров.
 
-`visualization/tracker_layers_rerun.py` строит `.rrd` из сохраненного `rerun_export`.
+`visualization/tracker_layers_rerun.py` строит `.rrd` из `frame_*.npz` и на лету восстанавливает накопленную геометрию треков из `point_cloud + masks`.
+
+`frame_selectors/base.py` читает тот же per-frame экспорт для выбора ключевых кадров.
 
 # Как Работает Трекер
 
-Для каждого трека сохраняются:
+Во время трекинга для каждого трека поддерживаются:
 - класс объекта
 - маски по кадрам
-- voxel-геометрия по кадрам
+- визуальные эмбеддинги по кадрам
+- накопленная voxel-геометрия
+
+В итоговый экспорт сохраняется не состояние трека целиком, а данные по каждому кадру:
+- изображение
+- видимые маски финальных треков
+- эмбеддинги видимых треков
+- point cloud сцены
+- intrinsic
+- extrinsic
+
+Накопленная 3D геометрия для визуализации не сохраняется отдельно. `tracker_layers_rerun.py` восстанавливает ее онлайн из последовательности кадров.
 
 Основная метрика сопоставления:
 - `w_ioa * ioa + w_dist * dist_similarity + w_emb * emb_similarity`
