@@ -1,19 +1,15 @@
-# Qwen Docker Setup
+# Qwen vLLM Setup
 
-This folder contains a simple Docker image for running supported `Qwen` models with the Hugging Face `transformers` library.
+This folder contains a small Docker image for serving `Qwen` models with `vLLM`.
 
-It does not auto-start anything. You enter the container in interactive mode and run commands manually.
-
-Important:
-
-- on smaller GPUs like a `RTX 4070`, use quantization instead of relying on automatic offload
-- this image is generic: choose the Qwen model you want when running `transformers serve`
+The image does not auto-start a model server. `start.sh` opens an interactive shell inside the container, and you run `vllm serve ...` manually.
 
 ## Files
 
-- `Dockerfile`: installs dependencies only
-- `build.sh`: builds the image
+- `Dockerfile`: thin wrapper over `vllm/vllm-openai`
+- `build.sh`: builds the local image
 - `start.sh`: opens an interactive shell on GPU `0`
+- `extract_relationships.py`: sends selected frames to the local OpenAI-compatible server
 
 ## Build
 
@@ -21,10 +17,10 @@ Important:
 ./build.sh
 ```
 
-If you built the image before the PyTorch update, rebuild it so the container no longer uses the old torch stack:
+If you want to rebuild from scratch:
 
 ```bash
-docker rmi qwen-transformers || true
+docker rmi qwen-vllm || true
 ./build.sh
 ```
 
@@ -46,8 +42,8 @@ This starts a container with:
 You can override these when starting the container:
 
 ```bash
-IMAGE_NAME=qwen-transformers
-CONTAINER_NAME=qwen-transformers
+IMAGE_NAME=qwen-vllm
+CONTAINER_NAME=qwen-vllm
 PORT=8000
 HF_CACHE_DIR=$HOME/.cache/huggingface
 ```
@@ -55,114 +51,105 @@ HF_CACHE_DIR=$HOME/.cache/huggingface
 Example:
 
 ```bash
-PORT=8010 CONTAINER_NAME=qwen35 ./start.sh
+PORT=8010 CONTAINER_NAME=qwen27b ./start.sh
 ```
 
 ## Run The Server Manually
 
-Inside the container, use the model name as a positional argument.
-
-General form:
+Inside the container:
 
 ```bash
-transformers serve <MODEL_ID> \
+vllm serve Qwen/Qwen3.5-27B \
   --host 0.0.0.0 \
   --port 8000 \
-  --dtype <DTYPE> \
-  --attn-implementation sdpa \
-  --continuous-batching
+  --dtype bfloat16 \
+  --api-key dummy \
+  --generation-config vllm
 ```
 
-Examples of `MODEL_ID` you could use:
+Notes:
+
+- `--generation-config vllm` avoids inheriting model repo generation defaults that can be surprising
+- keep the repo mounted at `/workspace` if you want to send image paths directly from `extract_relationships.py`
+- if Hugging Face rate limits you, login and pre-download the model to a local path, then serve that local path instead of the HF model id
+
+Examples of model ids you can use:
 
 - `Qwen/Qwen3.5-9B`
 - `Qwen/Qwen3.5-27B`
 - `Qwen/Qwen3.5-35B-A3B`
 - `Qwen/Qwen2.5-VL-7B-Instruct`
 
-## Qwen3.5-9B Examples
+## Thinking Control
 
-These concrete examples are kept here because they are useful reference points for different cards.
+Qwen 3.x models support thinking and non-thinking mode.
 
-For `A100`:
+For this repo, the default client request in `extract_relationships.py` does both:
+
+- adds `/no_think` in the first user text block
+- sends `chat_template_kwargs: {"enable_thinking": false}`
+
+That requires a backend like `vLLM` that supports `chat_template_kwargs`.
+
+## Structured JSON Output
+
+`extract_relationships.py` also sends:
+
+```json
+"response_format": {"type": "json_object"}
+```
+
+so the server is asked to return JSON instead of free-form reasoning text.
+
+## Relationship Extraction Script
+
+Run from the repo root on the host machine:
 
 ```bash
-transformers serve Qwen/Qwen3.5-9B \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --dtype bfloat16 \
-  --attn-implementation sdpa \
-  --continuous-batching
+python qwen/extract_relationships.py \
+  --selected-dir data/0/selected_frames \
+  --endpoint http://localhost:8000/v1/chat/completions \
+  --model Qwen/Qwen3.5-27B \
+  --api-key dummy \
+  --save-response-json
 ```
 
-For `V100` or GPUs without `bfloat16`:
+Expected selected-frame input:
 
-```bash
-transformers serve Qwen/Qwen3.5-9B \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --dtype float16 \
-  --attn-implementation sdpa \
-  --continuous-batching
-```
+- `data/0/selected_frames/frames.json`
+- `data/0/selected_frames/unmarked_frames/`
 
-For a smaller GPU such as `RTX 4070`, try 4-bit quantization:
+By default it saves:
 
-```bash
-transformers serve Qwen/Qwen3.5-9B \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --dtype float16 \
-  --attn-implementation sdpa \
-  --quantization bnb-4bit \
-  --continuous-batching
-```
+- raw assistant text to `selected_frames/qwen_relationships_raw.json`
+- optional full API response to `selected_frames/qwen_relationships_raw_response.json`
 
-The error you hit happened because this `transformers serve` version does not support `--force-model`. The model must be passed directly after `serve`.
-
-The later error:
-
-```text
-The current `device_map` had weights offloaded to the disk ... Please provide an `offload_folder`
-```
-
-means the model did try to load on your current GPU, but it did not have enough VRAM in the chosen precision, so Transformers attempted an automatic offload path that this model does not support cleanly in this CLI flow.
-
-If you hit a `set_submodule` error while using `bnb-4bit`, that points to an older PyTorch stack inside the container. Rebuild the image so it uses the newer Docker base in this folder.
-
-In practice:
-
-- `A100`: run `bfloat16`
-- `V100`: run `float16`
-- `RTX 4070` laptop: try `bnb-4bit`
-- if `bnb-4bit` still fails, use a smaller model
-
-For larger Qwen models, the same dtype guidance applies, but VRAM requirements go up significantly.
-
-## Multi-Image Request Example
+## Direct Multi-Image Request Example
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dummy" \
   -d '{
-    "model": "Qwen/Qwen3.5-9B",
+    "model": "Qwen/Qwen3.5-27B",
     "messages": [
       {
         "role": "user",
         "content": [
-          {"type": "text", "text": "Compare these images."},
-          {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/astronaut.jpg"}},
-          {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/car.jpg"}}
+          {"type": "text", "text": "/no_think\nDescribe this image. Output only JSON."},
+          {"type": "image_url", "image_url": {"url": "/workspace/data/0/images/frame_001.jpg"}}
         ]
       }
     ],
-    "max_tokens": 512
+    "chat_template_kwargs": {"enable_thinking": false},
+    "response_format": {"type": "json_object"},
+    "temperature": 0,
+    "max_tokens": 1024
   }'
 ```
 
 ## Notes
 
 - `start.sh` always uses `--gpus "device=0"`
-- `build.sh` and `start.sh` are model-agnostic; the model is chosen when you run `transformers serve`
-- the `flash-linear-attention` / `causal-conv1d` message is a performance warning, not the main failure
-- for large multi-image prompts, you may still need to reduce image size or output length to avoid OOM
+- `build.sh` and `start.sh` are model-agnostic; the model is chosen when you run `vllm serve`
+- for large multi-image prompts, you may still need to reduce image count or increase `max_tokens`

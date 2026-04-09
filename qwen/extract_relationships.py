@@ -26,6 +26,10 @@ Rules:
 - Only output relationships clearly supported by the provided frames and metadata.
 - Newly appearing objects must also be considered from the first frame where they appear.
 - Use only object ids that appear in the provided metadata.
+- Do not explain your reasoning.
+- Do not analyze step by step.
+- Do not restate the input.
+- Output exactly one JSON object and nothing else.
 
 Predicate vocabulary:
 ["on", "under", "above", "below", "in front of", "behind", "inside", "around", "intersecting", "overlapping", "covering", "attached to", "leaning on", "against"]
@@ -88,9 +92,10 @@ def _build_user_content(
         {
             "type": "text",
             "text": (
+                "/no_think\n"
                 "Analyze this ordered frame sequence and extract spatial relationships. "
                 "Use the provided frame metadata together with the images. "
-                "Return JSON only."
+                "Return exactly one JSON object and no extra text."
             ),
         }
     ]
@@ -138,16 +143,24 @@ def _build_payload(
                 ),
             },
         ],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "response_format": {"type": "json_object"},
         "temperature": 0,
         "max_tokens": max_tokens,
     }
 
 
-def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _post_json(
+    url: str, payload: dict[str, Any], api_key: str | None
+) -> dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     req = request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -201,7 +214,7 @@ def main() -> None:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=2048,
+        default=4096,
         help="Maximum number of output tokens.",
     )
     parser.add_argument(
@@ -221,6 +234,12 @@ def main() -> None:
         default=Path("/workspace"),
         help="Repo root as seen by the Qwen server. Defaults to /workspace.",
     )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="Optional bearer token for the vLLM server.",
+    )
     args = parser.parse_args()
 
     selected_dir = args.selected_dir.resolve()
@@ -235,7 +254,7 @@ def main() -> None:
         repo_root,
         args.server_repo_root,
     )
-    response_json = _post_json(args.endpoint, payload)
+    response_json = _post_json(args.endpoint, payload, args.api_key)
     assistant_text = _extract_assistant_text(response_json)
 
     output_file = args.output_file
