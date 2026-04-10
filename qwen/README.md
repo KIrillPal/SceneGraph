@@ -2,13 +2,14 @@
 
 This folder contains a small Docker image for serving `Qwen` models with `vLLM`.
 
-The image does not auto-start a model server. `start.sh` opens an interactive shell inside the container, and you run `vllm serve ...` manually.
+The image does not auto-start a model server. `start.sh` opens an interactive shell inside the container, and `serve.sh` starts `vllm serve` with the defaults used by this repo.
 
 ## Files
 
 - `Dockerfile`: thin wrapper over `vllm/vllm-openai`
 - `build.sh`: builds the local image
 - `start.sh`: opens an interactive shell on GPU `0`
+- `serve.sh`: starts `vllm serve` with local media access enabled
 - `extract_relationships.py`: sends selected frames to the local OpenAI-compatible server
 
 ## Build
@@ -54,6 +55,29 @@ Example:
 PORT=8010 CONTAINER_NAME=qwen27b ./start.sh
 ```
 
+## Run The Server
+
+Inside the container, the simplest option is:
+
+```bash
+./qwen/serve.sh
+```
+
+This uses:
+
+- `MODEL_ID=Qwen/Qwen3.5-27B`
+- `HOST=0.0.0.0`
+- `PORT=8000`
+- `DTYPE=bfloat16`
+- `API_KEY=dummy`
+- `ALLOWED_LOCAL_MEDIA_PATH=/workspace`
+
+You can override them:
+
+```bash
+MODEL_ID=Qwen/Qwen2.5-VL-7B-Instruct API_KEY=mykey ./qwen/serve.sh
+```
+
 ## Run The Server Manually
 
 Inside the container:
@@ -64,13 +88,15 @@ vllm serve Qwen/Qwen3.5-27B \
   --port 8000 \
   --dtype bfloat16 \
   --api-key dummy \
-  --generation-config vllm
+  --generation-config vllm \
+  --allowed-local-media-path /workspace
 ```
 
 Notes:
 
 - `--generation-config vllm` avoids inheriting model repo generation defaults that can be surprising
-- keep the repo mounted at `/workspace` if you want to send image paths directly from `extract_relationships.py`
+- keep the repo mounted at `/workspace` if you want to send image files directly from `extract_relationships.py`
+- `--allowed-local-media-path /workspace` is required when requests use `file:///workspace/...` image URLs
 - if Hugging Face rate limits you, login and pre-download the model to a local path, then serve that local path instead of the HF model id
 
 Examples of model ids you can use:
@@ -137,7 +163,7 @@ curl http://localhost:8000/v1/chat/completions \
         "role": "user",
         "content": [
           {"type": "text", "text": "/no_think\nDescribe this image. Output only JSON."},
-          {"type": "image_url", "image_url": {"url": "/workspace/data/0/images/frame_001.jpg"}}
+          {"type": "image_url", "image_url": {"url": "file:///workspace/data/0/images/frame_001.jpg"}}
         ]
       }
     ],
@@ -151,5 +177,5 @@ curl http://localhost:8000/v1/chat/completions \
 ## Notes
 
 - `start.sh` always uses `--gpus "device=0"`
-- `build.sh` and `start.sh` are model-agnostic; the model is chosen when you run `vllm serve`
+- `build.sh`, `start.sh`, and `serve.sh` are model-agnostic via environment variables
 - for large multi-image prompts, you may still need to reduce image count or increase `max_tokens`

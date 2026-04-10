@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 docker run \
-  --gpus all \
+  --gpus "device=0" \
   --rm \
   -it \
   --name sam3_inference \

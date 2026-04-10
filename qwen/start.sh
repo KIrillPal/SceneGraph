@@ -21,4 +21,4 @@ docker run --rm -it \
   -v "${REPO_DIR}:/workspace" \
   -w /workspace \
   "${IMAGE_NAME}" \
-  bash
+  --model Qwen/Qwen3.5-27B

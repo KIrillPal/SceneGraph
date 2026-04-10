@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -29,10 +30,10 @@ Rules:
 - Do not explain your reasoning.
 - Do not analyze step by step.
 - Do not restate the input.
+- Do **NOT** miss any clear and valid spatial relationships between objects.
 - Output exactly one JSON object and nothing else.
 
-Predicate vocabulary:
-["on", "under", "above", "below", "in front of", "behind", "inside", "around", "intersecting", "overlapping", "covering", "attached to", "leaning on", "against"]
+Do **NOT** output relations "next to", "left", "right", "in front of", "in the back of".
 
 Return exactly one valid JSON object and no extra text:
 {
@@ -70,16 +71,38 @@ def _frame_image_path(selected_dir: Path, frame_id: int) -> Path:
     raise FileNotFoundError(f"Could not find image for frame {frame_id} in {image_dir}")
 
 
-def _server_image_path(
-    image_path: Path, repo_root: Path, server_repo_root: Path
-) -> str:
+def _server_image_url(image_path: Path, repo_root: Path, server_repo_root: Path) -> str:
     image_path = image_path.resolve()
     repo_root = repo_root.resolve()
     try:
         rel_path = image_path.relative_to(repo_root)
     except ValueError:
-        return str(image_path)
-    return str((server_repo_root / rel_path).as_posix())
+        return image_path.as_uri()
+    return (server_repo_root / rel_path).as_uri()
+
+
+def _data_image_url(image_path: Path) -> str:
+    suffix = image_path.suffix.lower()
+    if suffix == ".png":
+        mime = "image/png"
+    elif suffix in {".jpg", ".jpeg"}:
+        mime = "image/jpeg"
+    else:
+        raise ValueError(f"Unsupported image extension: {image_path}")
+
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _image_url(
+    image_path: Path,
+    repo_root: Path,
+    server_repo_root: Path,
+    image_url_mode: str,
+) -> str:
+    if image_url_mode == "data":
+        return _data_image_url(image_path)
+    return _server_image_url(image_path, repo_root, server_repo_root)
 
 
 def _build_user_content(
@@ -87,6 +110,7 @@ def _build_user_content(
     frames: list[dict[str, Any]],
     repo_root: Path,
     server_repo_root: Path,
+    image_url_mode: str,
 ) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {
@@ -114,7 +138,12 @@ def _build_user_content(
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": _server_image_path(image_path, repo_root, server_repo_root)
+                    "url": _image_url(
+                        image_path,
+                        repo_root,
+                        server_repo_root,
+                        image_url_mode,
+                    )
                 },
             }
         )
@@ -127,6 +156,7 @@ def _build_payload(
     max_tokens: int,
     repo_root: Path,
     server_repo_root: Path,
+    image_url_mode: str,
 ) -> dict[str, Any]:
     frames = _read_frames_json(selected_dir)
     return {
@@ -140,6 +170,7 @@ def _build_payload(
                     frames,
                     repo_root,
                     server_repo_root,
+                    image_url_mode,
                 ),
             },
         ],
@@ -168,6 +199,12 @@ def _post_json(
             return json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        if "allowed-local-media-path" in body:
+            body += (
+                "\n\nHint: start vLLM with "
+                "`--allowed-local-media-path /workspace` "
+                "or another directory that contains the images."
+            )
         raise RuntimeError(f"HTTP {exc.code} from Qwen server:\n{body}") from exc
 
 
@@ -240,6 +277,12 @@ def main() -> None:
         default=None,
         help="Optional bearer token for the vLLM server.",
     )
+    parser.add_argument(
+        "--image-url-mode",
+        choices=["auto", "file", "data"],
+        default="auto",
+        help="How to send images to the server. 'auto' tries file:// first and falls back to data: URLs.",
+    )
     args = parser.parse_args()
 
     selected_dir = args.selected_dir.resolve()
@@ -247,14 +290,30 @@ def main() -> None:
         raise FileNotFoundError(f"Selected dir does not exist: {selected_dir}")
 
     repo_root = Path(__file__).resolve().parents[1]
+    image_url_mode = "file" if args.image_url_mode == "auto" else args.image_url_mode
     payload = _build_payload(
         selected_dir,
         args.model,
         args.max_tokens,
         repo_root,
         args.server_repo_root,
+        image_url_mode,
     )
-    response_json = _post_json(args.endpoint, payload, args.api_key)
+    try:
+        response_json = _post_json(args.endpoint, payload, args.api_key)
+    except RuntimeError as exc:
+        if args.image_url_mode != "auto" or "allowed-local-media-path" not in str(exc):
+            raise
+
+        payload = _build_payload(
+            selected_dir,
+            args.model,
+            args.max_tokens,
+            repo_root,
+            args.server_repo_root,
+            "data",
+        )
+        response_json = _post_json(args.endpoint, payload, args.api_key)
     assistant_text = _extract_assistant_text(response_json)
 
     output_file = args.output_file
