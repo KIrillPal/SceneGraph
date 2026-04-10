@@ -23,11 +23,16 @@ COPY da3_streaming/requirements.txt /workspace/da3_streaming/requirements.txt
 
 RUN python -m pip install --upgrade pip
 
-RUN python -m pip install xformers "torch>=2" torchvision
+RUN python -m pip install --index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 xformers==0.0.28.post3
 
-RUN python -m pip install -e .
+RUN grep -Ev '^(torch|torchvision|torchaudio|xformers)([<>=!~].*)?$' /workspace/requirements.txt > /tmp/requirements_no_torch.txt
 
-RUN python -m pip install -e ".[app]"
+RUN python -m pip install -r /tmp/requirements_no_torch.txt
+
+RUN python -m pip install -e . --no-deps
+
+RUN python -m pip install -e ".[app]" --no-deps
 
 RUN grep -v '^faiss-gpu$' /workspace/da3_streaming/requirements.txt > /tmp/da3_streaming_requirements.txt
 
