@@ -248,8 +248,8 @@ class UniformSelector(BaseSelector):
 
 
 if __name__ == "__main__":
-    selector = UniformSelector(8)
-    frame_iter = selector.read_data("data/0/tracker_outputs")
+    selector = UniformSelector(12)
+    frame_iter = selector.read_data("data/7/tracker_ouputs")
     frame_ids = selector.select_frames(frame_iter)
-    frame_iter = selector.read_data("data/0/tracker_outputs")
-    selector.save_frames(frame_ids, frame_iter, "data/0/selected_frames")
+    frame_iter = selector.read_data("data/7/tracker_ouputs")
+    selector.save_frames(frame_ids, frame_iter, "data/7/selected_frames")
