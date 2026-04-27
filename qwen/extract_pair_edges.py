@@ -33,16 +33,22 @@ Relationship = list[Any]
 SYSTEM_PROMPT = """You are a precise spatial relationship classifier.
 
 You receive a few images of the same two static objects and metadata with their ids, labels, and coordinates.
-Predict one static spatial relationship for the pair.
+Predict one static spatial relationship from object A to object B.
 
 Rules:
-- Use only the two requested object ids.
-- Use only one predicate from the closed vocabulary.
-- Return exactly one line and no explanation.
+- Object A is always the first id in the requested pair.
+- Object B is always the second id in the requested pair.
+- The answer must describe the relation of object A to object B.
+- Return exactly one word from the closed vocabulary, or return: none
+- Do not output ids.
+- Do not output JSON.
+- Do not output explanation.
 - If there is no clear relationship, return: none
 
-Output format:
-subject_id predicate object_id
+Output format examples:
+above
+on
+none
 
 Closed vocabulary:
 {vocabulary}
@@ -103,10 +109,11 @@ def _build_user_content(
             "type": "text",
             "text": (
                 "/no_think\n"
-                f"Predict one static relationship for object pair {pair}. "
+                f"Predict one static relationship from object {pair[0]} to object {pair[1]}. "
                 f"Labels: {json.dumps(labels, ensure_ascii=True)}."
                 f"{source_note} "
-                "Use only the provided frames and coordinates. Return one line only."
+                "Use only the provided frames and coordinates. "
+                "Return exactly one predicate word from the closed vocabulary, or none."
             ),
         }
     ]
@@ -156,6 +163,10 @@ def _parse_relation_text(text: str, pair: tuple[int, int]) -> tuple[int, str, in
     if not text or text.lower() == "none" or "none" == text.lower().strip(" ."):
         return None
 
+    first_line = text.splitlines()[0].strip().strip("` .\"'")
+    if first_line in RELATION_VOCABULARY:
+        return pair[0], first_line, pair[1]
+
     try:
         payload = json.loads(text)
         relationships = payload.get("relationships", [])
@@ -165,7 +176,6 @@ def _parse_relation_text(text: str, pair: tuple[int, int]) -> tuple[int, str, in
     except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
         pass
 
-    first_line = text.splitlines()[0].strip().strip("` ")
     for predicate in sorted(RELATION_VOCABULARY, key=len, reverse=True):
         pattern = rf"^\s*(\d+)\s+{re.escape(predicate)}\s+(\d+)\s*[\.]?\s*$"
         match = re.match(pattern, first_line, flags=re.IGNORECASE)
