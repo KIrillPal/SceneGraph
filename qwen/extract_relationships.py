@@ -8,51 +8,24 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
-
-SYSTEM_PROMPT = """You are a detail-oriented Video Relationship Annotator.
-
-Your job is to review an ordered sequence of sampled video frames and extract visually grounded spatial relationships between tracked objects.
-
-Task context:
-- Videos are sampled at 1 fps.
-- Each frame contains detected objects with unique integer ids.
-- The input sequence is ordered by time.
-
-Rules:
-- Use the full sequence jointly, not frame-by-frame in isolation.
-- Extract only spatial, physical, or geometric relationships visible in the scene.
-- Do not output actions, functions, intentions, attention, social relations, or object states.
-- Do not output left of or right of.
-- Use 3D scene reasoning from visual cues and common sense, not only 2D box coordinates.
-- Only output relationships clearly supported by the provided frames and metadata.
-- Newly appearing objects must also be considered from the first frame where they appear.
-- Use only object ids that appear in the provided metadata.
-- Do not explain your reasoning.
-- Do not analyze step by step.
-- Do not restate the input.
-- Do **NOT** miss any clear and valid spatial relationships between objects.
-- Output exactly one JSON object and nothing else.
-
-Do **NOT** output relations "next to", "left", "right", "in front of", "in the back of".
-
-Return exactly one valid JSON object and no extra text:
-{
-  "relationships": [
-    [subject_id, predicate_verb, object_id, [[start_frame, end_frame], ...]]
-  ]
-}
-
-Requirements:
-- subject_id and object_id must be integers
-- predicate_verb must be a string from the allowed vocabulary
-- frame indices must be integers
-- each interval must be [start_frame, end_frame] with start_frame <= end_frame
-- if no valid relationships exist, return {"relationships": []}
-"""
+try:
+    from .prompts import get_system_prompt
+except ImportError:
+    from prompts import get_system_prompt
 
 
-def _read_frames_json(selected_dir: Path) -> list[dict[str, Any]]:
-    frames_path = selected_dir / "frames.json"
+def _metadata_filename(metadata_format: str) -> str:
+    if metadata_format == "bbox":
+        return "frames.json"
+    if metadata_format == "center":
+        return "frames_centers.json"
+    raise ValueError(f"Unsupported metadata format: {metadata_format}")
+
+
+def _read_frames_json(selected_dir: Path, metadata_format: str) -> list[dict[str, Any]]:
+    frames_path = selected_dir / _metadata_filename(metadata_format)
+    if not frames_path.is_file():
+        raise FileNotFoundError(f"Could not find frame metadata: {frames_path}")
     with frames_path.open(encoding="utf-8") as f:
         payload = json.load(f)
     frames = payload.get("frames", [])
@@ -60,8 +33,8 @@ def _read_frames_json(selected_dir: Path) -> list[dict[str, Any]]:
     return frames
 
 
-def _frame_image_path(selected_dir: Path, frame_id: int) -> Path:
-    image_dir = selected_dir / "unmarked_frames"
+def _frame_image_path(selected_dir: Path, frame_id: int, image_source: str) -> Path:
+    image_dir = selected_dir / image_source
     image_path = image_dir / f"frame_{frame_id:04d}.png"
     if image_path.is_file():
         return image_path
@@ -111,6 +84,7 @@ def _build_user_content(
     repo_root: Path,
     server_repo_root: Path,
     image_url_mode: str,
+    image_source: str,
 ) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {
@@ -127,7 +101,7 @@ def _build_user_content(
     for frame in frames:
         frame_id = int(frame["frame_id"])
         frame_text = json.dumps(frame, ensure_ascii=True)
-        image_path = _frame_image_path(selected_dir, frame_id)
+        image_path = _frame_image_path(selected_dir, frame_id, image_source)
         content.append(
             {
                 "type": "text",
@@ -157,12 +131,14 @@ def _build_payload(
     repo_root: Path,
     server_repo_root: Path,
     image_url_mode: str,
+    metadata_format: str,
+    image_source: str,
 ) -> dict[str, Any]:
-    frames = _read_frames_json(selected_dir)
+    frames = _read_frames_json(selected_dir, metadata_format)
     return {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": get_system_prompt(metadata_format)},
             {
                 "role": "user",
                 "content": _build_user_content(
@@ -171,6 +147,7 @@ def _build_payload(
                     repo_root,
                     server_repo_root,
                     image_url_mode,
+                    image_source,
                 ),
             },
         ],
@@ -234,7 +211,19 @@ def main() -> None:
         "--selected-dir",
         type=Path,
         required=True,
-        help="Directory with frames.json and unmarked_frames/.",
+        help="Directory with frame metadata and selected frame images.",
+    )
+    parser.add_argument(
+        "--metadata-format",
+        choices=["bbox", "center"],
+        default="bbox",
+        help="Frame metadata format: 'bbox' reads frames.json, 'center' reads frames_centers.json.",
+    )
+    parser.add_argument(
+        "--image-source",
+        choices=["unmarked_frames", "marked_frames"],
+        default="unmarked_frames",
+        help="Selected-frame image directory to send to the model.",
     )
     parser.add_argument(
         "--endpoint",
@@ -245,7 +234,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3.5-27B",
+        default="Qwen/Qwen3.5-4B",
         help="Model name exposed by the Qwen server.",
     )
     parser.add_argument(
@@ -298,6 +287,8 @@ def main() -> None:
         repo_root,
         args.server_repo_root,
         image_url_mode,
+        args.metadata_format,
+        args.image_source,
     )
     try:
         response_json = _post_json(args.endpoint, payload, args.api_key)
@@ -312,6 +303,8 @@ def main() -> None:
             repo_root,
             args.server_repo_root,
             "data",
+            args.metadata_format,
+            args.image_source,
         )
         response_json = _post_json(args.endpoint, payload, args.api_key)
     assistant_text = _extract_assistant_text(response_json)
