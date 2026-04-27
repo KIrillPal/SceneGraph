@@ -89,15 +89,20 @@ class BaseSelector(ABC):
         target_frame_ids = {int(frame_id) for frame_id in frame_ids}
         if not target_frame_ids:
             metadata_path = output_dir / "frames.json"
+            centers_metadata_path = output_dir / "frames_centers.json"
             with metadata_path.open("w", encoding="utf-8") as f:
+                json.dump({"frames": []}, f, indent=2)
+            with centers_metadata_path.open("w", encoding="utf-8") as f:
                 json.dump({"frames": []}, f, indent=2)
             return {
                 "marked_frames_dir": marked_frames_dir,
                 "unmarked_frames_dir": unmarked_frames_dir,
                 "metadata_path": metadata_path,
+                "centers_metadata_path": centers_metadata_path,
             }
 
         metadata_frames: list[dict[str, Any]] = []
+        centers_metadata_frames: list[dict[str, Any]] = []
         missing_frame_ids = set(target_frame_ids)
 
         save_bar = tqdm(enumerate(frame_sample_iter), desc="Saving frames")
@@ -108,6 +113,7 @@ class BaseSelector(ABC):
             height, width = image.shape[:2]
             marked_image = image.copy()
             detected_objects: list[dict[str, Any]] = []
+            detected_object_centers: list[dict[str, Any]] = []
 
             for class_name in sorted(masks):
                 for track_id in sorted(masks[class_name]):
@@ -123,12 +129,21 @@ class BaseSelector(ABC):
                     self._draw_text_with_outline(
                         marked_image, str(track_id), mark_xy, color
                     )
+                    normalized_bbox = self._normalize_bbox(bbox, width, height)
+                    normalized_center = self._normalize_xy(mark_xy, width, height)
 
                     detected_objects.append(
                         {
                             "id": int(track_id),
                             "label": class_name,
-                            "bbox": bbox,
+                            "bbox": normalized_bbox,
+                        }
+                    )
+                    detected_object_centers.append(
+                        {
+                            "id": int(track_id),
+                            "label": class_name,
+                            "center": normalized_center,
                         }
                     )
 
@@ -149,6 +164,13 @@ class BaseSelector(ABC):
                     "detected_objects": detected_objects,
                 }
             )
+            centers_metadata_frames.append(
+                {
+                    "frame_id": int(frame_idx),
+                    "frame_size": {"width": int(width), "height": int(height)},
+                    "detected_objects": detected_object_centers,
+                }
+            )
             missing_frame_ids.discard(frame_idx)
 
             if not missing_frame_ids:
@@ -161,14 +183,19 @@ class BaseSelector(ABC):
             raise ValueError(f"Requested frames were not found: {missing_str}")
 
         metadata_frames.sort(key=lambda item: item["frame_id"])
+        centers_metadata_frames.sort(key=lambda item: item["frame_id"])
         metadata_path = output_dir / "frames.json"
+        centers_metadata_path = output_dir / "frames_centers.json"
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump({"frames": metadata_frames}, f, indent=2)
+        with centers_metadata_path.open("w", encoding="utf-8") as f:
+            json.dump({"frames": centers_metadata_frames}, f, indent=2)
 
         return {
             "marked_frames_dir": marked_frames_dir,
             "unmarked_frames_dir": unmarked_frames_dir,
             "metadata_path": metadata_path,
+            "centers_metadata_path": centers_metadata_path,
         }
 
     def _resize_mask(self, mask: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
@@ -185,6 +212,29 @@ class BaseSelector(ABC):
         if len(xs) == 0 or len(ys) == 0:
             return None
         return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+    def _normalize_bbox(
+        self, bbox: list[int], width: int, height: int
+    ) -> list[int]:
+        x1, y1, x2, y2 = bbox
+        return [
+            self._normalize_coord(x1, width),
+            self._normalize_coord(y1, height),
+            self._normalize_coord(x2, width),
+            self._normalize_coord(y2, height),
+        ]
+
+    def _normalize_xy(
+        self, xy: tuple[int, int], width: int, height: int
+    ) -> list[int]:
+        x, y = xy
+        return [self._normalize_coord(x, width), self._normalize_coord(y, height)]
+
+    def _normalize_coord(self, value: int | float, extent: int) -> int:
+        if extent <= 1:
+            return 0
+        normalized = round(float(value) * 999.0 / float(extent - 1))
+        return int(np.clip(normalized, 0, 999))
 
     def _get_mark_xy(self, mask: np.ndarray) -> tuple[int, int]:
         mask_uint8 = mask.astype(np.uint8)
