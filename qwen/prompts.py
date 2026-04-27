@@ -2,16 +2,15 @@ from __future__ import annotations
 
 
 RELATION_VOCABULARY = [
-    "above",
-    "below",
     "on",
     "under",
-    "intersecting",
     "inside",
     "touching",
     "attached_to",
-    "containing",
-    "occludes",
+    "between",
+    "below",
+    "above",
+    "occluded_by"    
 ]
 
 RELATION_VOCABULARY_TEXT = "\n".join(f"- {relation}" for relation in RELATION_VOCABULARY)

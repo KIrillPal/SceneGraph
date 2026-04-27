@@ -22,6 +22,31 @@ def _metadata_filename(metadata_format: str) -> str:
     raise ValueError(f"Unsupported metadata format: {metadata_format}")
 
 
+def _default_output_filename(metadata_format: str, image_source: str) -> str:
+    return f"qwen_relationships_{metadata_format}_{image_source}_raw.json"
+
+
+def format_relationship_payload(payload: dict[str, Any]) -> str:
+    relationships = payload.get("relationships", [])
+    if not isinstance(relationships, list):
+        raise ValueError("Expected 'relationships' to be a list")
+
+    lines = ['{', '  "relationships": [']
+    for idx, relationship in enumerate(relationships):
+        suffix = "," if idx < len(relationships) - 1 else ""
+        lines.append(f"    {json.dumps(relationship, ensure_ascii=False)}{suffix}")
+    lines.extend(["  ]", "}"])
+    return "\n".join(lines) + "\n"
+
+
+def _format_assistant_relationship_text(assistant_text: str) -> str:
+    try:
+        payload = json.loads(assistant_text)
+    except json.JSONDecodeError:
+        return assistant_text
+    return format_relationship_payload(payload)
+
+
 def _read_frames_json(selected_dir: Path, metadata_format: str) -> list[dict[str, Any]]:
     frames_path = selected_dir / _metadata_filename(metadata_format)
     if not frames_path.is_file():
@@ -254,7 +279,7 @@ def main() -> None:
         "--output-file",
         type=Path,
         default=None,
-        help="Where to save the raw assistant text. Defaults to <selected-dir>/qwen_relationships_raw.json.",
+        help="Where to save the raw assistant text. Defaults to <selected-dir>/qwen_relationships_<metadata-format>_<image-source>_raw.json.",
     )
     parser.add_argument(
         "--save-response-json",
@@ -318,10 +343,14 @@ def main() -> None:
 
     output_file = args.output_file
     if output_file is None:
-        output_file = selected_dir / "qwen_relationships_raw.json"
+        output_file = selected_dir / _default_output_filename(
+            args.metadata_format, args.image_source
+        )
     output_file = output_file.resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(assistant_text, encoding="utf-8")
+    output_file.write_text(
+        _format_assistant_relationship_text(assistant_text), encoding="utf-8"
+    )
 
     if args.save_response_json:
         response_path = output_file.with_name(output_file.stem + "_response.json")

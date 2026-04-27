@@ -15,6 +15,7 @@ try:
         _extract_assistant_text,
         _post_json,
         _read_frames_json,
+        format_relationship_payload,
     )
     from .prompts import get_system_prompt
 except ImportError:
@@ -23,12 +24,26 @@ except ImportError:
         _extract_assistant_text,
         _post_json,
         _read_frames_json,
+        format_relationship_payload,
     )
     from prompts import get_system_prompt
 
 
 Pair = tuple[int, int]
 Relationship = list[Any]
+
+
+def _default_output_filename(metadata_format: str, image_source: str) -> str:
+    return f"qwen_relationships_pairwise_{metadata_format}_{image_source}_raw.json"
+
+
+def _new_stats() -> dict[str, int]:
+    return {
+        "raw_relationships": 0,
+        "kept_relationships": 0,
+        "dropped_off_pair": 0,
+        "dropped_malformed": 0,
+    }
 
 
 def _objects_by_frame(frames: list[dict[str, Any]]) -> dict[int, dict[int, str]]:
@@ -137,27 +152,84 @@ def _parse_relationship_json(text: str) -> list[Relationship]:
     return relationships
 
 
-def _valid_pair_relationship(relationship: Relationship, pair: Pair) -> Relationship | None:
-    if not isinstance(relationship, list) or len(relationship) != 4:
-        return None
-    subject_id = int(relationship[0])
-    predicate = str(relationship[1])
-    object_id = int(relationship[2])
-    if {subject_id, object_id} != set(pair):
-        return None
+def _normalize_intervals(raw_intervals: Any) -> list[list[int]]:
+    if not isinstance(raw_intervals, list):
+        return []
+
+    if len(raw_intervals) == 2 and all(
+        isinstance(value, (int, float, str)) for value in raw_intervals
+    ):
+        try:
+            start_frame = int(raw_intervals[0])
+            end_frame = int(raw_intervals[1])
+        except (TypeError, ValueError):
+            return []
+        if end_frame < start_frame:
+            return []
+        return [[start_frame, end_frame]]
+
+    if raw_intervals and all(
+        isinstance(value, (int, float, str)) for value in raw_intervals
+    ):
+        values: list[int] = []
+        try:
+            values = [int(value) for value in raw_intervals]
+        except (TypeError, ValueError):
+            return []
+
+        intervals: list[list[int]] = []
+        for idx in range(0, len(values), 2):
+            start_frame = values[idx]
+            end_frame = values[idx + 1] if idx + 1 < len(values) else start_frame
+            if end_frame >= start_frame:
+                intervals.append([start_frame, end_frame])
+        return intervals
 
     intervals: list[list[int]] = []
-    for interval in relationship[3]:
+    for interval in raw_intervals:
         if not isinstance(interval, list) or len(interval) != 2:
             continue
-        start_frame = int(interval[0])
-        end_frame = int(interval[1])
+        try:
+            start_frame = int(interval[0])
+            end_frame = int(interval[1])
+        except (TypeError, ValueError):
+            continue
         if end_frame < start_frame:
             continue
         intervals.append([start_frame, end_frame])
+    return intervals
 
-    if not intervals:
+
+def _valid_pair_relationship(
+    relationship: Relationship,
+    pair: Pair,
+    stats: dict[str, int] | None = None,
+) -> Relationship | None:
+    if not isinstance(relationship, list) or len(relationship) != 4:
+        if stats is not None:
+            stats["dropped_malformed"] += 1
         return None
+    try:
+        subject_id = int(relationship[0])
+        predicate = str(relationship[1])
+        object_id = int(relationship[2])
+    except (TypeError, ValueError):
+        if stats is not None:
+            stats["dropped_malformed"] += 1
+        return None
+
+    if {subject_id, object_id} != set(pair):
+        if stats is not None:
+            stats["dropped_off_pair"] += 1
+        return None
+
+    intervals = _normalize_intervals(relationship[3])
+    if not intervals:
+        if stats is not None:
+            stats["dropped_malformed"] += 1
+        return None
+    if stats is not None:
+        stats["kept_relationships"] += 1
     return [subject_id, predicate, object_id, intervals]
 
 
@@ -225,6 +297,11 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--output-file", type=Path, default=None)
     parser.add_argument("--pair-responses-file", type=Path, default=None)
+    parser.add_argument(
+        "--print-responses",
+        action="store_true",
+        help="Print each raw Qwen pair response before validation/filtering.",
+    )
     parser.add_argument("--server-repo-root", type=Path, default=Path("/workspace"))
     parser.add_argument("--api-key", type=str, default=None)
     parser.add_argument(
@@ -275,6 +352,7 @@ def main() -> None:
 
     relationships: list[Relationship] = []
     pair_response_rows: list[dict[str, Any]] = []
+    stats = _new_stats()
 
     progress = tqdm(pairs, desc="Pairwise Qwen extraction", unit="pair")
     for pair in progress:
@@ -311,11 +389,18 @@ def main() -> None:
             response_json = _post_json(args.endpoint, payload, args.api_key)
 
         assistant_text = _extract_assistant_text(response_json)
+        if args.print_responses:
+            print("\n" + "=" * 80)
+            print(f"Pair {pair[0]},{pair[1]} raw Qwen response:")
+            print(assistant_text)
+            print("=" * 80)
+
         parsed_relationships = _parse_relationship_json(assistant_text)
+        stats["raw_relationships"] += len(parsed_relationships)
         valid_relationships = [
             relationship
             for relationship in (
-                _valid_pair_relationship(relationship, pair)
+                _valid_pair_relationship(relationship, pair, stats)
                 for relationship in parsed_relationships
             )
             if relationship is not None
@@ -330,16 +415,26 @@ def main() -> None:
             }
         )
 
-    output_file = args.output_file or (selected_dir / "qwen_relationships_pairwise_raw.json")
+    output_file = args.output_file or (
+        selected_dir
+        / _default_output_filename(args.metadata_format, args.image_source)
+    )
     output_file = output_file.resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
     merged_payload = {"relationships": _merge_relationships(relationships)}
-    output_file.write_text(json.dumps(merged_payload, indent=2), encoding="utf-8")
+    output_file.write_text(format_relationship_payload(merged_payload), encoding="utf-8")
 
     if args.pair_responses_file is not None:
         _write_jsonl(args.pair_responses_file.resolve(), pair_response_rows)
 
     print(f"Processed {len(pairs)} pairs")
+    print(
+        "Relationships: "
+        f"raw={stats['raw_relationships']}, "
+        f"kept={stats['kept_relationships']}, "
+        f"dropped_off_pair={stats['dropped_off_pair']}, "
+        f"dropped_malformed={stats['dropped_malformed']}"
+    )
     print(f"Saved merged pairwise relationships to {output_file}")
 
 
