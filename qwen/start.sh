@@ -22,5 +22,5 @@ docker run --rm -it \
   -v "${REPO_DIR}:/workspace" \
   -w /workspace \
   "${IMAGE_NAME}" \
-  --model Qwen/Qwen3.5-27B \
+  --model Qwen/Qwen3.5-4B \
   --allowed-local-media-path "${ALLOWED_LOCAL_MEDIA_PATH}"

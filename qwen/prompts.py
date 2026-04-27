@@ -12,8 +12,6 @@ RELATION_VOCABULARY = [
     "attached_to",
     "containing",
     "occludes",
-    "in_front_of",
-    "behind",
 ]
 
 RELATION_VOCABULARY_TEXT = "\n".join(f"- {relation}" for relation in RELATION_VOCABULARY)
