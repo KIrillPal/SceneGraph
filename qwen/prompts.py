@@ -1,6 +1,24 @@
 from __future__ import annotations
 
 
+RELATION_VOCABULARY = [
+    "above",
+    "below",
+    "on",
+    "under",
+    "intersecting",
+    "inside",
+    "touching",
+    "attached_to",
+    "containing",
+    "occludes",
+    "in_front_of",
+    "behind",
+]
+
+RELATION_VOCABULARY_TEXT = "\n".join(f"- {relation}" for relation in RELATION_VOCABULARY)
+
+
 BBOX_SYSTEM_PROMPT = """You are a detail-oriented Video Relationship Annotator.
 
 Your job is to review an ordered sequence of sampled video frames and extract visually grounded spatial relationships between tracked objects.
@@ -24,8 +42,11 @@ Rules:
 - Do not analyze step by step.
 - Do not restate the input.
 - Do **NOT** miss any clear and valid spatial relationships between objects.
+- Use only predicates from this closed vocabulary:
+__RELATION_VOCABULARY__
 - Output exactly one JSON object and nothing else.
 
+Do **NOT** output any predicate outside the closed vocabulary.
 Do **NOT** output relations "next to", "left", "right", "in front of", "in the back of".
 
 Return exactly one valid JSON object and no extra text:
@@ -37,11 +58,11 @@ Return exactly one valid JSON object and no extra text:
 
 Requirements:
 - subject_id and object_id must be integers
-- predicate_verb must be a string from the allowed vocabulary
+- predicate_verb must be exactly one string from the closed vocabulary
 - frame indices must be integers
 - each interval must be [start_frame, end_frame] with start_frame <= end_frame
 - if no valid relationships exist, return {"relationships": []}
-"""
+""".replace("__RELATION_VOCABULARY__", RELATION_VOCABULARY_TEXT)
 
 
 CENTER_SYSTEM_PROMPT = """You are a detail-oriented Video Relationship Annotator.
@@ -67,8 +88,11 @@ Rules:
 - Do not analyze step by step.
 - Do not restate the input.
 - Do **NOT** miss any clear and valid spatial relationships between objects.
+- Use only predicates from this closed vocabulary:
+__RELATION_VOCABULARY__
 - Output exactly one JSON object and nothing else.
 
+Do **NOT** output any predicate outside the closed vocabulary.
 Do **NOT** output relations "next to", "left", "right", "in front of", "in the back of".
 
 Return exactly one valid JSON object and no extra text:
@@ -80,11 +104,11 @@ Return exactly one valid JSON object and no extra text:
 
 Requirements:
 - subject_id and object_id must be integers
-- predicate_verb must be a string from the allowed vocabulary
+- predicate_verb must be exactly one string from the closed vocabulary
 - frame indices must be integers
 - each interval must be [start_frame, end_frame] with start_frame <= end_frame
 - if no valid relationships exist, return {"relationships": []}
-"""
+""".replace("__RELATION_VOCABULARY__", RELATION_VOCABULARY_TEXT)
 
 
 SYSTEM_PROMPTS = {

@@ -68,8 +68,8 @@ class MaskCoverageSelector(BaseSelector):
         pair_weight: float = 1.0,
         novelty_weight: float = 0.5,
     ) -> None:
-        if max_frames <= 0:
-            raise ValueError("max_frames must be positive")
+        if max_frames < 2:
+            raise ValueError("max_frames must be at least 2 to include first and last frames")
         if min_gap < 0:
             raise ValueError("min_gap must be non-negative")
         if views_per_object <= 0:
@@ -260,6 +260,22 @@ class MaskCoverageSelector(BaseSelector):
         remaining = set(range(len(candidates)))
 
         select_bar = tqdm(total=self.max_frames, desc="Selecting frames")
+        for idx in dict.fromkeys([0, len(candidates) - 1]):
+            if idx < 0 or idx not in remaining or len(selected_indices) >= self.max_frames:
+                continue
+            self._add_selected_candidate(
+                candidates[idx],
+                idx,
+                selected_indices,
+                selected_frame_ids,
+                object_counts,
+                pair_counts,
+                covered_object_views,
+                covered_pair_views,
+                remaining,
+            )
+            select_bar.update(1)
+
         while remaining and len(selected_indices) < self.max_frames:
             best_idx: int | None = None
             best_score = self.min_gain
@@ -280,21 +296,44 @@ class MaskCoverageSelector(BaseSelector):
             if best_idx is None:
                 break
 
-            candidate = candidates[best_idx]
-            selected_indices.append(best_idx)
-            selected_frame_ids.append(candidate.frame_id)
-            remaining.remove(best_idx)
-
-            for track_id, obj in candidate.objects.items():
-                object_counts[track_id] = object_counts.get(track_id, 0) + 1
-                covered_object_views.add(obj.view_key)
-            for pair in candidate.pairs:
-                pair_counts[pair] = pair_counts.get(pair, 0) + 1
-            covered_pair_views.update(candidate.pair_view_keys)
+            self._add_selected_candidate(
+                candidates[best_idx],
+                best_idx,
+                selected_indices,
+                selected_frame_ids,
+                object_counts,
+                pair_counts,
+                covered_object_views,
+                covered_pair_views,
+                remaining,
+            )
             select_bar.update(1)
 
         select_bar.close()
         return sorted(selected_frame_ids)
+
+    def _add_selected_candidate(
+        self,
+        candidate: _FrameCandidate,
+        candidate_idx: int,
+        selected_indices: list[int],
+        selected_frame_ids: list[int],
+        object_counts: dict[int, int],
+        pair_counts: dict[tuple[int, int], int],
+        covered_object_views: set[ObjectKey],
+        covered_pair_views: set[PairKey],
+        remaining: set[int],
+    ) -> None:
+        selected_indices.append(candidate_idx)
+        selected_frame_ids.append(candidate.frame_id)
+        remaining.remove(candidate_idx)
+
+        for track_id, obj in candidate.objects.items():
+            object_counts[track_id] = object_counts.get(track_id, 0) + 1
+            covered_object_views.add(obj.view_key)
+        for pair in candidate.pairs:
+            pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        covered_pair_views.update(candidate.pair_view_keys)
 
     def _candidate_score(
         self,

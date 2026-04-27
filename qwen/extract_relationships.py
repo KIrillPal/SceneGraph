@@ -86,6 +86,12 @@ def _build_user_content(
     image_url_mode: str,
     image_source: str,
 ) -> list[dict[str, Any]]:
+    marked_hint = ""
+    if image_source == "marked_frames":
+        marked_hint = (
+            " The images contain numeric labels drawn on objects; "
+            "these numbers correspond to the object ids in the frame metadata. "
+        )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -93,6 +99,7 @@ def _build_user_content(
                 "/no_think\n"
                 "Analyze this ordered frame sequence and extract spatial relationships. "
                 "Use the provided frame metadata together with the images. "
+                f"{marked_hint}"
                 "Return exactly one JSON object and no extra text."
             ),
         }

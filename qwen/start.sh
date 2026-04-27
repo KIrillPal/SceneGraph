@@ -7,6 +7,7 @@ IMAGE_NAME="${IMAGE_NAME:-qwen-vllm}"
 CONTAINER_NAME="${CONTAINER_NAME:-qwen-vllm}"
 PORT="${PORT:-8000}"
 CACHE_DIR="${HF_CACHE_DIR:-${HOME}/.cache/huggingface}"
+ALLOWED_LOCAL_MEDIA_PATH="${ALLOWED_LOCAL_MEDIA_PATH:-/workspace}"
 
 mkdir -p "${CACHE_DIR}"
 
@@ -21,4 +22,5 @@ docker run --rm -it \
   -v "${REPO_DIR}:/workspace" \
   -w /workspace \
   "${IMAGE_NAME}" \
-  --model Qwen/Qwen3.5-27B
+  --model Qwen/Qwen3.5-27B \
+  --allowed-local-media-path "${ALLOWED_LOCAL_MEDIA_PATH}"
