@@ -23,13 +23,14 @@ Task:
 - Identify the unique visible object categories in the scene.
 - Assign each object category one label: "static" or "dynamic".
 - "dynamic" means the object category can independently move in a scene, such as person, animal, bicycle, car, bus, truck, motorcycle, train, boat.
-- "static" means furniture, fixtures, buildings, roads, plants, walls, floors, signs, containers, and other non-agent scene objects.
+- "static" means furniture, fixtures, buildings, plants, signs, containers, and other non-agent scene objects.
 
 Rules:
 - Use concise lowercase singular category names suitable as SAM3 text prompts.
 - Merge synonyms and near-duplicates, e.g. "automobile" -> "car", "people" -> "person".
 - Do not include colors, materials, sizes, ids, relationships, or attributes.
 - Do not include vague words like "object", "thing", "item", "background".
+- Do not output background objects like "road", "floor", "wall", "grass" and others.
 - Include important scene objects even if visible in only one selected frame.
 - Do not explain your reasoning.
 - Do not analyze step by step.

@@ -6,6 +6,7 @@ Visibility update EVERY frame with camera motion compensation using EXTRINSICS.
 """
 
 import cv2
+import os
 import torch
 import numpy as np
 import open3d as o3d
@@ -772,9 +773,11 @@ class Simple3DTracker:
         self.dynamic_classes_list = [str(cls).lower() for cls in dynamic_classes_list]
         
         self.device = device
-        self.point_tracker = CoTrackerOnlinePredictor(
-            'co-tracker/checkpoints/scaled_online.pth'
-        ).to(device)
+        cotracker_checkpoint = os.environ.get(
+            "COTRACKER_CHECKPOINT",
+            "co-tracker/checkpoints/scaled_online.pth",
+        )
+        self.point_tracker = CoTrackerOnlinePredictor(cotracker_checkpoint).to(device)
         self.cotracker_window_len = Config.COTRACKER_WINDOW_LEN
         self.video = video
         _,  _, self.H, self.W, = video.size()
