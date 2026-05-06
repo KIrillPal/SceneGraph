@@ -2,6 +2,10 @@ FROM vllm/vllm-openai:latest
 
 ARG TRANSFORMERS_REF=main
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir --upgrade \
       "git+https://github.com/huggingface/transformers.git@${TRANSFORMERS_REF}"
