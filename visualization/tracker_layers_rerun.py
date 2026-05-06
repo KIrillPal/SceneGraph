@@ -57,11 +57,15 @@ ENTITY_MASKED_IMAGE = "image/masked"
 DEFAULT_CONFIG = {
     "fps": 5.0,
     "scene_sub": 2,
+    "scene_voxel_size": 0.03,
     "track_sub": 1,
     "track_radius": 0.004,
+    "track_voxel_size": 0.02,
     "track_voxels_sub": 1,
     "track_voxels_radius": 0.004,
+    "track_accum_voxel_size": 0.02,
     "mask_alpha": 0.3,
+    "enable_sor": False,
 }
 DESCRIPTION = """
 # 3D tracker - Rerun
@@ -79,19 +83,55 @@ DESCRIPTION = """
 _INDEX_RE = re.compile(r"(\d+)(?!.*\d)")
 
 
+def _voxel_downsample(
+    points: np.ndarray,
+    colors: Optional[np.ndarray],
+    voxel_size: float,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    if voxel_size <= 0 or len(points) <= 1:
+        return points, colors
+
+    points = np.asarray(points, dtype=np.float32)
+    finite_mask = np.isfinite(points).all(axis=1)
+    if not np.all(finite_mask):
+        points = points[finite_mask]
+        colors = colors[finite_mask] if colors is not None else None
+    if len(points) <= 1:
+        return points, colors
+
+    indices = np.floor(points / voxel_size).astype(np.int64)
+    _, unique_indices = np.unique(indices, axis=0, return_index=True)
+    unique_indices.sort()
+    points = points[unique_indices]
+    if colors is not None:
+        colors = np.asarray(colors)[unique_indices]
+    return points, colors
+
+
 class OnlineVoxelMap:
     """Lightweight voxel accumulator used to rebuild merged track geometry."""
 
-    def __init__(self, voxel_size: float = 0.01, alpha: float = 0.3):
+    def __init__(
+        self, voxel_size: float = 0.02, alpha: float = 0.3, enable_sor: bool = False
+    ):
         self.voxel_size = voxel_size
         self.alpha = alpha
+        self.enable_sor = enable_sor
         self.voxels: dict[tuple[int, int, int], np.ndarray] = {}
+        self._cached_points: Optional[np.ndarray] = None
+        self._dirty = True
 
     def add_points(self, points: np.ndarray) -> None:
         if len(points) == 0:
             return
 
         points = np.asarray(points, dtype=np.float32)
+        points = points[np.isfinite(points).all(axis=1)]
+        if len(points) == 0:
+            return
+
+        # Reduce repeated raw points before touching the Python dict.
+        points, _ = _voxel_downsample(points, None, self.voxel_size)
         indices = np.floor(points / self.voxel_size).astype(np.int32)
         for idx, point in zip(indices, points):
             key = (int(idx[0]), int(idx[1]), int(idx[2]))
@@ -101,14 +141,23 @@ class OnlineVoxelMap:
                 ] + self.alpha * point
             else:
                 self.voxels[key] = point.copy()
+        self._dirty = True
 
     def get_points(self) -> np.ndarray:
+        if not self._dirty and self._cached_points is not None:
+            return self._cached_points
+
         if not self.voxels:
-            return np.zeros((0, 3), dtype=np.float32)
+            self._cached_points = np.zeros((0, 3), dtype=np.float32)
+            self._dirty = False
+            return self._cached_points
 
         points = np.stack(list(self.voxels.values()), axis=0).astype(np.float32)
-        points, _ = statistical_outlier_removal(points)
-        return np.asarray(points, dtype=np.float32)
+        if self.enable_sor:
+            points, _ = statistical_outlier_removal(points)
+        self._cached_points = np.asarray(points, dtype=np.float32)
+        self._dirty = False
+        return self._cached_points
 
 
 def statistical_outlier_removal(
@@ -187,6 +236,12 @@ def _resolve_export_dir(path: Path) -> Path:
     raise FileNotFoundError(f"Could not find frame_*.npz export in {path}")
 
 
+def _default_save_path(export_dir: Path) -> Path:
+    if export_dir.name == "tracker_outputs":
+        return export_dir.parent / "tracker_layers.rrd"
+    return export_dir / "tracker_layers.rrd"
+
+
 def _get_frame_paths(export_dir: Path) -> list[Path]:
     frame_paths = sorted(export_dir.glob("frame_*.npz"), key=_sort_key)
     if not frame_paths:
@@ -230,11 +285,15 @@ def _load_frame_payload(frame_path: Path) -> dict[str, object]:
         }
 
 
+def _load_frame_masks(frame_path: Path) -> dict[str, dict[int, np.ndarray]]:
+    with np.load(frame_path, allow_pickle=True) as data:
+        return _load_object_dict(data["masks"], np.bool_)
+
+
 def _collect_track_ids(frame_paths: list[Path]) -> list[int]:
     track_ids: set[int] = set()
     for frame_path in frame_paths:
-        payload = _load_frame_payload(frame_path)
-        masks = payload["masks"]
+        masks = _load_frame_masks(frame_path)
         for track_map in masks.values():
             track_ids.update(int(track_id) for track_id in track_map)
     return sorted(track_ids)
@@ -280,7 +339,7 @@ def _render_masked_image(
 
 
 def _extract_scene_points(
-    image: np.ndarray, point_cloud: np.ndarray
+    image: np.ndarray, point_cloud: np.ndarray, voxel_size: float = 0.0
 ) -> tuple[np.ndarray, Optional[np.ndarray]]:
     valid_mask = np.isfinite(point_cloud).all(axis=2)
     if not np.any(valid_mask):
@@ -291,12 +350,15 @@ def _extract_scene_points(
     image_resized = cv2.resize(image, (w_pc, h_pc), interpolation=cv2.INTER_LINEAR)
     image_rgb = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
     colors = image_rgb[valid_mask].astype(np.uint8)
+    points, colors = _voxel_downsample(points, colors, voxel_size)
     return points, colors
 
 
 def _extract_track_clouds(
     masks: dict[str, dict[int, np.ndarray]],
     point_cloud: np.ndarray,
+    voxel_size: float = 0.0,
+    enable_sor: bool = False,
 ) -> list[tuple[int, np.ndarray]]:
     clouds: list[tuple[int, np.ndarray]] = []
     h_pc, w_pc = point_cloud.shape[:2]
@@ -312,7 +374,9 @@ def _extract_track_clouds(
             eroded_mask = safe_erode(resized_mask)
             object_mask = valid_points & (eroded_mask > 0)
             points = point_cloud[object_mask]
-            points, _ = statistical_outlier_removal(points)
+            if enable_sor:
+                points, _ = statistical_outlier_removal(points)
+            points, _ = _voxel_downsample(points, None, voxel_size)
             if len(points) == 0:
                 continue
             clouds.append((int(track_id), np.asarray(points, dtype=np.float32)))
@@ -418,9 +482,13 @@ def _merge_track_clouds(
 def _update_track_voxel_maps(
     track_clouds: list[tuple[int, np.ndarray]],
     voxel_maps: dict[int, OnlineVoxelMap],
+    voxel_size: float,
+    enable_sor: bool,
 ) -> None:
     for track_id, points in track_clouds:
-        voxel_map = voxel_maps.setdefault(int(track_id), OnlineVoxelMap())
+        voxel_map = voxel_maps.setdefault(
+            int(track_id), OnlineVoxelMap(voxel_size=voxel_size, enable_sor=enable_sor)
+        )
         voxel_map.add_points(points)
 
 
@@ -442,6 +510,20 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
     frame_paths = _get_frame_paths(export_dir)
     track_colors = _make_track_color_map(_collect_track_ids(frame_paths))
     voxel_maps: dict[int, OnlineVoxelMap] = {}
+    scene_voxel_size = float(
+        getattr(rr_args, "scene_voxel_size", DEFAULT_CONFIG["scene_voxel_size"])
+    )
+    track_voxel_size = float(
+        getattr(rr_args, "track_voxel_size", DEFAULT_CONFIG["track_voxel_size"])
+    )
+    track_accum_voxel_size = float(
+        getattr(
+            rr_args,
+            "track_accum_voxel_size",
+            DEFAULT_CONFIG["track_accum_voxel_size"],
+        )
+    )
+    enable_sor = bool(getattr(rr_args, "enable_sor", DEFAULT_CONFIG["enable_sor"]))
 
     rr.script_setup(rr_args, "3d_tracker_rrd")
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
@@ -482,7 +564,9 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
                 rr.send_blueprint(blueprint, make_active=True, make_default=True)
             blueprint_sent = True
 
-        scene_points, scene_colors = _extract_scene_points(image, point_cloud)
+        scene_points, scene_colors = _extract_scene_points(
+            image, point_cloud, voxel_size=scene_voxel_size
+        )
         _log_points(
             scene_points,
             scene_colors,
@@ -491,7 +575,12 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             static=False,
         )
 
-        track_clouds = _extract_track_clouds(masks, point_cloud)
+        track_clouds = _extract_track_clouds(
+            masks,
+            point_cloud,
+            voxel_size=track_voxel_size,
+            enable_sor=enable_sor,
+        )
         _log_track_id_labels(track_clouds, track_colors)
         track_points, track_point_colors = _merge_track_clouds(
             track_clouds, track_colors
@@ -505,7 +594,12 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             radius=float(DEFAULT_CONFIG["track_radius"]),
         )
 
-        _update_track_voxel_maps(track_clouds, voxel_maps)
+        _update_track_voxel_maps(
+            track_clouds,
+            voxel_maps,
+            voxel_size=track_accum_voxel_size,
+            enable_sor=enable_sor,
+        )
         merged_voxel_points, merged_voxel_colors = _merge_track_voxel_clouds(
             voxel_maps,
             track_colors,
@@ -533,12 +627,35 @@ def main() -> None:
         required=True,
         help="Path to the tracker output directory with frame_*.npz files.",
     )
+    parser.add_argument(
+        "--scene-voxel-size",
+        type=float,
+        default=float(DEFAULT_CONFIG["scene_voxel_size"]),
+        help="Voxel size for scene point clouds before logging. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--track-voxel-size",
+        type=float,
+        default=float(DEFAULT_CONFIG["track_voxel_size"]),
+        help="Voxel size for per-frame object clouds before logging. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--track-accum-voxel-size",
+        type=float,
+        default=float(DEFAULT_CONFIG["track_accum_voxel_size"]),
+        help="Voxel size for accumulated track geometry.",
+    )
+    parser.add_argument(
+        "--enable-sor",
+        action="store_true",
+        help="Enable slow statistical outlier removal for visualization clouds.",
+    )
     rr.script_add_args(parser)
     args = parser.parse_args()
 
     export_dir = _resolve_export_dir(args.export_dir)
     if getattr(args, "save", None) is None:
-        args.save = str(export_dir / "tracker_layers.rrd")
+        args.save = str(_default_save_path(export_dir))
 
     run_from_export(export_dir=export_dir, rr_args=args)
 
