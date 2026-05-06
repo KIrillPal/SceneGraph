@@ -213,7 +213,7 @@ def main() -> None:
         default="marked_frames",
     )
     parser.add_argument("--endpoint", type=str, default="http://localhost:8000/v1/chat/completions")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3.5-4B")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3.5-27B")
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--output-file", type=Path, default=None)
     parser.add_argument("--server-repo-root", type=Path, default=Path("/workspace"))

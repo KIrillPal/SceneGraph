@@ -11,6 +11,7 @@ The image does not auto-start a model server. `start.sh` opens an interactive sh
 - `start.sh`: opens an interactive shell on GPU `0`
 - `serve.sh`: starts `vllm serve` with local media access enabled
 - `extract_relationships.py`: sends selected frames to the local OpenAI-compatible server
+- `extract_object_list.py`: sends selected keyframes and writes SAM3 object prompts with static/dynamic labels
 
 ## Build
 
@@ -149,6 +150,27 @@ By default it saves:
 
 - raw assistant text to `selected_frames/qwen_relationships_raw.json`
 - optional full API response to `selected_frames/qwen_relationships_raw_response.json`
+
+## Object List Script
+
+Run from the repo root on selected keyframes, for example from `MaxInfo` or `PSFR`:
+
+```bash
+python qwen/extract_object_list.py \
+  data/0/selected_maxinfo \
+  data/0/objects_static_dynamic.txt \
+  --endpoint http://localhost:8000/v1/chat/completions \
+  --model Qwen/Qwen3.5-27B \
+  --api-key dummy
+```
+
+The output text file has one object prompt per line:
+
+```text
+chair, static
+car, dynamic
+person, dynamic
+```
 
 ## Direct Multi-Image Request Example
 

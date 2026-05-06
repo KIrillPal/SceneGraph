@@ -18,6 +18,22 @@ parser.add_argument("txt_path", type=str, help="Path .txt with unique objects in
 parser.add_argument("save_path", type=str, help="Path to folder where to save predicted masks and embeddings")
 args = parser.parse_args()      
 
+
+def read_object_names(txt_path: str) -> list[str]:
+    object_names = []
+    seen = set()
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name = line.split(",", maxsplit=1)[0].strip()
+            if not name or name in seen:
+                continue
+            object_names.append(name)
+            seen.add(name)
+    return object_names
+
 os.makedirs(f'{args.save_path}/tracks', exist_ok=True)
 
 predictor = build_sam3_video_predictor(checkpoint_path="/workspace/sam3/sam3.pt")
@@ -29,8 +45,7 @@ h, w, c = image.shape
 frame_embeds = get_frame_embeddings(args.image_folder)
 save_embeddings(frame_embeds, save_path=args.save_path)
 # Read txt with unique objects into list
-with open(args.txt_path, "r") as f:
-    object_names = [line.strip() for line in f if line.strip()]
+object_names = read_object_names(args.txt_path)
 # Segment with text prompt
 preds = {}
 for name in object_names:

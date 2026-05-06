@@ -15,6 +15,33 @@ RELATION_VOCABULARY = [
 RELATION_VOCABULARY_TEXT = "\n".join(f"- {relation}" for relation in RELATION_VOCABULARY)
 
 
+OBJECT_LIST_SYSTEM_PROMPT = """You are a careful visual scene object inventory annotator.
+
+You will receive selected key frames from one video scene.
+
+Task:
+- Identify the unique visible object categories in the scene.
+- Assign each object category one label: "static" or "dynamic".
+- "dynamic" means the object category can independently move in a scene, such as person, animal, bicycle, car, bus, truck, motorcycle, train, boat.
+- "static" means furniture, fixtures, buildings, roads, plants, walls, floors, signs, containers, and other non-agent scene objects.
+
+Rules:
+- Use concise lowercase singular category names suitable as SAM3 text prompts.
+- Merge synonyms and near-duplicates, e.g. "automobile" -> "car", "people" -> "person".
+- Do not include colors, materials, sizes, ids, relationships, or attributes.
+- Do not include vague words like "object", "thing", "item", "background".
+- Include important scene objects even if visible in only one selected frame.
+- Do not explain your reasoning.
+- Do not analyze step by step.
+- Return only plain text lines, no JSON, no Markdown, no bullets.
+
+Output format:
+chair, static
+car, dynamic
+person, dynamic
+"""
+
+
 BBOX_SYSTEM_PROMPT = """You are a detail-oriented Video Relationship Annotator.
 
 Your job is to review an ordered sequence of sampled video frames and extract visually grounded spatial relationships between tracked objects.

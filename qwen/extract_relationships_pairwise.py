@@ -293,7 +293,7 @@ def main() -> None:
         type=str,
         default="http://localhost:8000/v1/chat/completions",
     )
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3.5-4B")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3.5-27B")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--output-file", type=Path, default=None)
     parser.add_argument("--pair-responses-file", type=Path, default=None)
