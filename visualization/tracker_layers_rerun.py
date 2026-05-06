@@ -329,8 +329,8 @@ def _log_camera_transform(
     rr.log(
         CAMERA_ENTITY,
         rr.Transform3D(
-            translation=extrinsic_w2c[:, 3],
-            quaternion=rr.Quaternion(xyzw=rotation.as_quat()),
+            translation=np.asarray(extrinsic_w2c[:, 3], dtype=np.float32),
+            quaternion=np.asarray(rotation.as_quat(), dtype=np.float32),
             relation=rr.TransformRelation.ChildFromParent,
         ),
     )

@@ -7,10 +7,9 @@ RELATION_VOCABULARY = [
     "inside",
     "touching",
     "attached_to",
-    "between",
-    "below",
+    "occluded_by",
     "above",
-    "occluded_by"    
+    "below" 
 ]
 
 RELATION_VOCABULARY_TEXT = "\n".join(f"- {relation}" for relation in RELATION_VOCABULARY)
