@@ -12,6 +12,7 @@ docker run \
   --rm \
   -it \
   --name sam3_inference \
+  --user "$(id -u):$(id -g)" \
   -v "${CACHE_DIR}:/root/.cache/huggingface" \
   -v "${SCRIPT_DIR}:/workspace/sam3" \
   -w /workspace/sam3 \

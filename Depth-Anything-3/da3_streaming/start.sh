@@ -11,6 +11,7 @@ docker run \
   --rm \
   -it \
   --name depth_anything_3_streaming \
+  --user "$(id -u):$(id -g)" \
   -v "${SCRIPT_DIR}:/workspace/da3_streaming" \
   -v "${SCRIPT_DIR}/.cache:/workspace/.cache" \
   -v "${DATA_DIR}:/workspace/da3_streaming/data" \
