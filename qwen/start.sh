@@ -15,7 +15,6 @@ docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 docker run --rm -it \
   --name "${CONTAINER_NAME}" \
-  --user "$(id -u):$(id -g)" \
   --gpus "device=0" \
   --ipc=host \
   -p "${PORT}:8000" \
