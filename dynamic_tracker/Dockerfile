@@ -56,6 +56,7 @@ RUN python -m pip install \
     scikit-image==0.25.2 \
     scikit-learn==1.7.2 \
     sentence-transformers \
+    transformers==4.57.6 \
     timm==1.0.22 \
     tqdm==4.67.1 \
     pillow==11.3.0 \

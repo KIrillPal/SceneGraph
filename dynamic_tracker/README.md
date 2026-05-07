@@ -95,10 +95,10 @@ python dynamic_tracker/run_tracker.py \
   <da3_outputs> \
   [save_path] \
   --dynamic-classes <objects_static_dynamic.txt> \
-  [--embedding-type {dino,sam3}]
+  [--embedding-type {dinov2,dinov3,sam}]
 ```
 
-`--embedding-type` defaults to `dino`.
+`--embedding-type` defaults to `dinov3`.
 
 Expected `sam3_outputs` layout:
 
@@ -111,7 +111,14 @@ sam3_outputs/
 `embeds/` is required when using:
 
 ```bash
---embedding-type sam3
+--embedding-type sam
+```
+
+DINO model defaults can be overridden with environment variables:
+
+```bash
+DINOV2_MODEL_NAME=vit_small_patch14_dinov2
+DINOV3_MODEL_NAME=facebook/dinov3-vits16-pretrain-lvd1689m
 ```
 
 Expected `da3_outputs` layout:
@@ -151,7 +158,7 @@ Run directly through `start.sh`:
   --dynamic-classes data/0/objects_static_dynamic.txt
 ```
 
-Using SAM3 embeddings instead of DINO:
+Using DINOv2 embeddings instead of DINOv3:
 
 ```bash
 ./dynamic_tracker/start.sh python dynamic_tracker/run_tracker.py \
@@ -160,7 +167,19 @@ Using SAM3 embeddings instead of DINO:
   data/0/da3_outputs \
   data/0/tracker_outputs \
   --dynamic-classes data/0/objects_static_dynamic.txt \
-  --embedding-type sam3
+  --embedding-type dinov2
+```
+
+Using SAM embeddings instead of DINO:
+
+```bash
+./dynamic_tracker/start.sh python dynamic_tracker/run_tracker.py \
+  data/0/images \
+  data/0/sam3_outputs \
+  data/0/da3_outputs \
+  data/0/tracker_outputs \
+  --dynamic-classes data/0/objects_static_dynamic.txt \
+  --embedding-type sam
 ```
 
 ## Output

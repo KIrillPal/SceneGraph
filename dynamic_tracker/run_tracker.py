@@ -46,9 +46,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--embedding-type",
-        default="dino",
-        choices=("dino", "sam3"),
-        help="Appearance embedding source to use for association (default: dino)",
+        default="dinov3",
+        choices=("dinov2", "dinov3", "sam"),
+        help="Appearance embedding source to use for association (default: dinov3)",
     )
     return parser.parse_args()
 
@@ -282,7 +282,7 @@ def validate_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         extrinsics_file,
         args.dynamic_classes,
     ]
-    if args.embedding_type == "sam3":
+    if args.embedding_type == "sam":
         required_paths.append(embeds_dir)
 
     for path in required_paths:
@@ -316,7 +316,7 @@ def main() -> None:
     images = read_images(args.image_folder)
     tracks = read_sam3_tracks(tracks_dir)
     frame_embeds = (
-        read_sam3_embeddings(embeds_dir) if args.embedding_type == "sam3" else None
+        read_sam3_embeddings(embeds_dir) if args.embedding_type == "sam" else None
     )
 
     if frame_embeds is not None and len(frame_embeds) < len(images):
@@ -346,11 +346,11 @@ def main() -> None:
     video_tensor = build_video_tensor(images)
 
     dino_extractor = None
-    if args.embedding_type == "dino":
+    if args.embedding_type in {"dinov2", "dinov3"}:
         from dino_extractor import get_dino_extractor
 
-        logger.info("Loading DINO extractor")
-        dino_extractor = get_dino_extractor(device=device)
+        logger.info("Loading %s extractor", args.embedding_type.upper())
+        dino_extractor = get_dino_extractor(version=args.embedding_type, device=device)
 
     tracker = Simple3DTracker(
         video_tensor,
@@ -371,7 +371,7 @@ def main() -> None:
                 frame_masks.append(track["masks"][frame_idx])
                 frame_track_ids.append(track_id)
 
-        if args.embedding_type == "dino":
+        if args.embedding_type in {"dinov2", "dinov3"}:
             visual_embeddings = dino_extractor.extract_from_frame(
                 image=images[frame_idx], masks=frame_masks, batch_size=32
             )
@@ -402,7 +402,7 @@ def main() -> None:
             det["keypoints"] = get_keypoints(images[frame_idx], det["mask"])
             det["text_embedding"] = text_embs[det["cls"]]
 
-            if args.embedding_type == "dino":
+            if args.embedding_type in {"dinov2", "dinov3"}:
                 det["embedding"] = visual_embeddings[det_idx]
             else:
                 det["embedding"] = get_object_embedding(

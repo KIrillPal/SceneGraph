@@ -1,11 +1,7 @@
-"""
-DINOv2 Appearance Extractor for SAM3 Tracker
-
-Optimized batch extraction: One image + N masks → N DINOv2 embeddings.
-Better than CLIP for fine-grained visual similarity (color, texture, details).
-"""
+"""DINO appearance extractor for SAM3 tracker."""
 
 import cv2
+import os
 import numpy as np
 import torch
 from typing import List, Tuple, Optional
@@ -18,10 +14,15 @@ import torchvision.transforms as transforms
 
 try:
     import timm
-    DINO_AVAILABLE = True
+    TIMM_AVAILABLE = True
 except ImportError:
-    DINO_AVAILABLE = False
-    print("⚠️  timm not installed. Install with: pip install timm")
+    TIMM_AVAILABLE = False
+
+try:
+    from transformers import AutoImageProcessor, AutoModel
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
 
 
 # ============================================================================
@@ -29,12 +30,16 @@ except ImportError:
 # ============================================================================
 
 class Config:
-    """Configuration parameters for DINOv2 appearance extraction."""
-    
+    """Configuration parameters for DINO appearance extraction."""
+     
     # === DINO MODEL ===
-    DINO_MODEL_NAME = "vit_small_patch14_dinov2"  # Options: vit_small, vit_base, vit_large
-    DINO_INPUT_SIZE = 518 # Standard DINO input resolution
-    DINO_EMBEDDING_DIM = 384  # Output dimension for vit_small (1024 for vit_base)
+    DINOV2_MODEL_NAME = os.environ.get("DINOV2_MODEL_NAME", "vit_small_patch14_dinov2")
+    DINOV3_MODEL_NAME = os.environ.get(
+        "DINOV3_MODEL_NAME",
+        "facebook/dinov3-vits16-pretrain-lvd1689m",
+    )
+    DINO_INPUT_SIZE = int(os.environ.get("DINO_INPUT_SIZE", "518"))
+    DINO_EMBEDDING_DIM = 384  # Default for small ViT models; inferred after loading.
     
     # === CROP PREPROCESSING ===
     CROP_MARGIN = 0.2  # 20% padding around object bounding box
@@ -51,20 +56,21 @@ class Config:
 
 
 # ============================================================================
-# DINOV2 APPEARANCE EXTRACTOR
+# DINO APPEARANCE EXTRACTOR
 # ============================================================================
 
 class DINOAppearanceExtractor:
     """
-    DINOv2 extractor: One image + N masks → N embeddings.
-    
+    DINO extractor: One image + N masks -> N embeddings.
+     
     Better than CLIP for fine-grained visual similarity.
     No internal caching or smoothing — handled by Track class.
     """
-    
+     
     def __init__(
         self,
-        model_name: str = Config.DINO_MODEL_NAME,
+        version: str = "dinov3",
+        model_name: Optional[str] = None,
         device: str = Config.DINO_DEVICE,
         input_size: int = Config.DINO_INPUT_SIZE,
         crop_margin: float = Config.CROP_MARGIN,
@@ -72,42 +78,70 @@ class DINOAppearanceExtractor:
         background_blur: int = Config.BACKGROUND_BLUR
     ):
         """
-        Initialize DINOv2 model.
-        
+        Initialize DINO model.
+         
         Args:
-            model_name: DINO model name (timm).
+            version: DINO version to load: 'dinov2' or 'dinov3'.
+            model_name: Optional model override.
             device: Device to run model on ('cuda' or 'cpu').
             input_size: DINO input resolution.
             crop_margin: Padding margin around object.
             mask_dilation: Dilation kernel size for mask.
             background_blur: Gaussian blur kernel for background.
         """
-        if not DINO_AVAILABLE:
-            raise ImportError(
-                "timm is not installed. Install with:\n"
-                "pip install timm"
-            )
-        
+        if version not in {"dinov2", "dinov3"}:
+            raise ValueError(f"Unsupported DINO version: {version}")
+         
+        self.version = version
         self.device = device
         self.input_size = input_size
         self.crop_margin = crop_margin
         self.mask_dilation = mask_dilation
         self.background_blur = background_blur
-        
-        # Load DINOv2 model (no classification head)
-        self.model = timm.create_model(model_name, pretrained=True, num_classes=0)
-        self.model.eval().to(device)
-        
-        # DINO preprocessing transform (ImageNet normalization)
-        self.dino_transform = transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.CenterCrop(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],  # ImageNet mean
-                std=[0.229, 0.224, 0.225]   # ImageNet std
-            )
-        ])
+        self.embedding_dim = Config.DINO_EMBEDDING_DIM
+         
+        if version == "dinov2":
+            if not TIMM_AVAILABLE:
+                raise ImportError("timm is required for DINOv2. Install with: pip install timm")
+            self.backend = "timm"
+            self.model_name = model_name or Config.DINOV2_MODEL_NAME
+            self.model = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+            self.embedding_dim = getattr(self.model, "num_features", self.embedding_dim)
+            self.model.eval().to(device)
+        else:
+            if not TRANSFORMERS_AVAILABLE:
+                raise ImportError(
+                    "transformers is required for DINOv3. Install with: pip install transformers"
+                )
+            self.backend = "transformers"
+            self.model_name = model_name or Config.DINOV3_MODEL_NAME
+            self.processor = AutoImageProcessor.from_pretrained(self.model_name)
+            self.model = AutoModel.from_pretrained(self.model_name)
+            self.embedding_dim = getattr(self.model.config, "hidden_size", self.embedding_dim)
+            self.model.eval().to(device)
+         
+        if self.backend == "timm":
+            # DINO preprocessing transform (ImageNet normalization)
+            self.dino_transform = transforms.Compose([
+                transforms.Resize(input_size),
+                transforms.CenterCrop(input_size),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                )
+            ])
+
+    @staticmethod
+    def _embedding_from_transformers_output(outputs) -> torch.Tensor:
+        if getattr(outputs, "pooler_output", None) is not None:
+            return outputs.pooler_output
+        if getattr(outputs, "last_hidden_state", None) is not None:
+            return outputs.last_hidden_state[:, 0]
+        if isinstance(outputs, tuple) and len(outputs) > 0:
+            first = outputs[0]
+            return first[:, 0] if first.ndim == 3 else first
+        raise RuntimeError("Could not extract DINOv3 embeddings from model output")
     
     def _dilate_mask(self, mask: np.ndarray) -> np.ndarray:
         """Dilate mask to include object boundaries."""
@@ -236,7 +270,7 @@ class DINOAppearanceExtractor:
         batch_size: int = Config.DINO_BATCH_SIZE
     ) -> np.ndarray:
         """
-        Extract DINOv2 embeddings for N objects from single frame.
+        Extract DINO embeddings for N objects from single frame.
         
         Args:
             image: Full frame RGB image [H, W, 3].
@@ -244,12 +278,12 @@ class DINOAppearanceExtractor:
             batch_size: Maximum batch size for DINO processing.
         
         Returns:
-            embeddings: Array [N, D] of DINOv2 embeddings (L2-normalized).
+            embeddings: Array [N, D] of DINO embeddings (L2-normalized).
         """
         N = len(masks)
-        
+         
         if N == 0:
-            return np.zeros((0, Config.DINO_EMBEDDING_DIM))
+            return np.zeros((0, self.embedding_dim))
         
         # === STEP 1: Prepare all crops ===
         pil_crops = []
@@ -284,18 +318,20 @@ class DINOAppearanceExtractor:
             batch_end = min(batch_start + batch_size, N)
             batch_crops = pil_crops[batch_start:batch_end]
             
-            # Apply DINO transforms
-            batch_tensors = [
-                self.dino_transform(crop) for crop in batch_crops
-            ]
-            batch_tensor = torch.stack(batch_tensors).to(self.device)
-            
-            # Extract embeddings (no gradient)
             with torch.no_grad():
-                embeddings = self.model(batch_tensor)
-                # L2 normalize for cosine similarity
+                if self.backend == "timm":
+                    batch_tensors = [self.dino_transform(crop) for crop in batch_crops]
+                    batch_tensor = torch.stack(batch_tensors).to(self.device)
+                    embeddings = self.model(batch_tensor)
+                else:
+                    inputs = self.processor(images=batch_crops, return_tensors="pt")
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    outputs = self.model(**inputs)
+                    embeddings = self._embedding_from_transformers_output(outputs)
+
                 embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
                 embeddings_np = embeddings.cpu().numpy()
+                self.embedding_dim = embeddings_np.shape[-1]
             
             all_embeddings.append(embeddings_np)
         
@@ -315,7 +351,7 @@ class DINOAppearanceExtractor:
             detections: List of detection dicts with 'mask' key.
         
         Returns:
-            List of DINOv2 embeddings [D] for each detection.
+            List of DINO embeddings [D] for each detection.
         """
         masks = [det.get("mask", None) for det in detections]
         embeddings = self.extract_from_frame(image, masks)
@@ -327,14 +363,25 @@ class DINOAppearanceExtractor:
 # ============================================================================
 
 _dino_extractor: Optional[DINOAppearanceExtractor] = None
+_dino_extractor_key: Optional[Tuple[str, str, str]] = None
 
 
-def get_dino_extractor(device: Optional[str] = None) -> DINOAppearanceExtractor:
-    """Get or create global DINOv2 extractor instance."""
-    global _dino_extractor
+def get_dino_extractor(
+    version: str = "dinov3",
+    device: Optional[str] = None,
+    model_name: Optional[str] = None,
+) -> DINOAppearanceExtractor:
+    """Get or create global DINO extractor instance."""
+    global _dino_extractor, _dino_extractor_key
     
-    if _dino_extractor is None:
-        target_device = device if device is not None else Config.DINO_DEVICE
-        _dino_extractor = DINOAppearanceExtractor(device=target_device)
+    target_device = device if device is not None else Config.DINO_DEVICE
+    key = (version, model_name or "", target_device)
+    if _dino_extractor is None or _dino_extractor_key != key:
+        _dino_extractor = DINOAppearanceExtractor(
+            version=version,
+            model_name=model_name,
+            device=target_device,
+        )
+        _dino_extractor_key = key
     
     return _dino_extractor

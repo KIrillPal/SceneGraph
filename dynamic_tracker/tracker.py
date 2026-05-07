@@ -45,7 +45,7 @@ class Config:
     TENTATIVE_ASS_THRESHOLD = 0.55
     TEXT_EMB_THRESHOLD = 0.75
     VISUAL_EMB_THRESHOLD = 0.75
-    MAX_DIST_MULTIPLIER = 3
+    MAX_DIST_MULTIPLIER = 4
     
     # Track lifecycle
     MAX_TENTATIVE_AGE = 20
@@ -91,6 +91,17 @@ def _ensure_embedding_2d(emb_array: np.ndarray, expected_dim: int = Config.TEXT_
             emb_array = emb_array.reshape(1, -1)
     
     return emb_array
+
+
+def _infer_embedding_dim(default_dim: int, *emb_arrays: np.ndarray) -> int:
+    for emb_array in emb_arrays:
+        emb_array = np.asarray(emb_array)
+        if emb_array.size == 0:
+            continue
+        if emb_array.ndim == 1:
+            return emb_array.shape[0]
+        return emb_array.shape[-1]
+    return default_dim
 
 
 def _compute_filter_matrices(
@@ -970,8 +981,9 @@ class Simple3DTracker:
         
         active_track_vis_embs = np.array([t.embedding for t in active_tracks])
         det_vis_embs = np.array([d["embedding"] for d in frame_detections])
-        active_track_vis_embs = _ensure_embedding_2d(active_track_vis_embs, Config.VIS_EMBEDDING_DIM)
-        det_vis_embs = _ensure_embedding_2d(det_vis_embs, Config.VIS_EMBEDDING_DIM)
+        vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, active_track_vis_embs, det_vis_embs)
+        active_track_vis_embs = _ensure_embedding_2d(active_track_vis_embs, vis_dim)
+        det_vis_embs = _ensure_embedding_2d(det_vis_embs, vis_dim)
         
         active_vis_norm = active_track_vis_embs / (np.linalg.norm(active_track_vis_embs, axis=1, keepdims=True) + 1e-8)
         det_vis_norm = det_vis_embs / (np.linalg.norm(det_vis_embs, axis=1, keepdims=True) + 1e-8)
@@ -1040,8 +1052,9 @@ class Simple3DTracker:
         if len(self.lost_tracks) > 0:
             lost_track_vis_embs = np.array([t.embedding for t in self.lost_tracks])
             lost_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            lost_track_vis_embs = _ensure_embedding_2d(lost_track_vis_embs, Config.VIS_EMBEDDING_DIM)
-            lost_det_vis_embs = _ensure_embedding_2d(lost_det_vis_embs, Config.VIS_EMBEDDING_DIM)
+            vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, lost_track_vis_embs, lost_det_vis_embs)
+            lost_track_vis_embs = _ensure_embedding_2d(lost_track_vis_embs, vis_dim)
+            lost_det_vis_embs = _ensure_embedding_2d(lost_det_vis_embs, vis_dim)
             
             lost_vis_norm = lost_track_vis_embs / (np.linalg.norm(lost_track_vis_embs, axis=1, keepdims=True) + 1e-8)
             lost_det_vis_norm = lost_det_vis_embs / (np.linalg.norm(lost_det_vis_embs, axis=1, keepdims=True) + 1e-8)
@@ -1107,8 +1120,9 @@ class Simple3DTracker:
         if len(tentative_tracks) > 0 and len(unmatched_detections) > 0:
             tentative_track_vis_embs = np.array([t.embedding for t in tentative_tracks])
             tentative_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            tentative_track_vis_embs = _ensure_embedding_2d(tentative_track_vis_embs, Config.VIS_EMBEDDING_DIM)
-            tentative_det_vis_embs = _ensure_embedding_2d(tentative_det_vis_embs, Config.VIS_EMBEDDING_DIM)
+            vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, tentative_track_vis_embs, tentative_det_vis_embs)
+            tentative_track_vis_embs = _ensure_embedding_2d(tentative_track_vis_embs, vis_dim)
+            tentative_det_vis_embs = _ensure_embedding_2d(tentative_det_vis_embs, vis_dim)
             
             tentative_vis_norm = tentative_track_vis_embs / (np.linalg.norm(tentative_track_vis_embs, axis=1, keepdims=True) + 1e-8)
             tentative_det_vis_norm = tentative_det_vis_embs / (np.linalg.norm(tentative_det_vis_embs, axis=1, keepdims=True) + 1e-8)
