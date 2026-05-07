@@ -179,9 +179,12 @@ frame_id
 image
 masks
 embeddings
+object_states
 point_cloud
 intrinsic
 extrinsic
 ```
+
+`object_states` is copied from the static/dynamic text file and maps class names to `static` or `dynamic`.
 
 This output is compatible with the existing visualization and downstream frame-selection scripts.

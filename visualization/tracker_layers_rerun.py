@@ -12,6 +12,7 @@ Each frame NPZ contains:
   - image
   - masks
   - embeddings
+  - object_states (optional)
   - point_cloud
   - intrinsic
   - extrinsic
@@ -268,6 +269,19 @@ def _load_object_dict(
     return out
 
 
+def _load_object_states(raw_obj: np.ndarray | dict | None) -> dict[str, str]:
+    if raw_obj is None:
+        return {}
+    if isinstance(raw_obj, np.ndarray) and raw_obj.dtype == object:
+        raw_obj = raw_obj.item()
+    if raw_obj is None:
+        return {}
+    return {
+        str(class_name).lower(): str(state).lower()
+        for class_name, state in dict(raw_obj).items()
+    }
+
+
 def _load_frame_payload(frame_path: Path) -> dict[str, object]:
     with np.load(frame_path, allow_pickle=True) as data:
         frame_id = (
@@ -279,6 +293,9 @@ def _load_frame_payload(frame_path: Path) -> dict[str, object]:
             "frame_id": frame_id,
             "image": np.asarray(data["image"]),
             "masks": _load_object_dict(data["masks"], np.bool_),
+            "object_states": _load_object_states(
+                data["object_states"] if "object_states" in data.files else None
+            ),
             "point_cloud": np.asarray(data["point_cloud"], dtype=np.float32),
             "intrinsic": np.asarray(data["intrinsic"], dtype=np.float32),
             "extrinsic": np.asarray(data["extrinsic"], dtype=np.float32),
@@ -288,6 +305,18 @@ def _load_frame_payload(frame_path: Path) -> dict[str, object]:
 def _load_frame_masks(frame_path: Path) -> dict[str, dict[int, np.ndarray]]:
     with np.load(frame_path, allow_pickle=True) as data:
         return _load_object_dict(data["masks"], np.bool_)
+
+
+def _dynamic_track_ids_from_masks(
+    masks: dict[str, dict[int, np.ndarray]],
+    object_states: dict[str, str],
+) -> set[int]:
+    dynamic_track_ids: set[int] = set()
+    for class_name, track_map in masks.items():
+        if object_states.get(str(class_name).lower()) != "dynamic":
+            continue
+        dynamic_track_ids.update(int(track_id) for track_id in track_map)
+    return dynamic_track_ids
 
 
 def _collect_track_ids(frame_paths: list[Path]) -> list[int]:
@@ -482,12 +511,17 @@ def _merge_track_clouds(
 def _update_track_voxel_maps(
     track_clouds: list[tuple[int, np.ndarray]],
     voxel_maps: dict[int, OnlineVoxelMap],
+    dynamic_track_ids: set[int],
     voxel_size: float,
     enable_sor: bool,
 ) -> None:
     for track_id, points in track_clouds:
+        track_id = int(track_id)
+        if track_id in dynamic_track_ids:
+            voxel_maps.pop(track_id, None)
+            continue
         voxel_map = voxel_maps.setdefault(
-            int(track_id), OnlineVoxelMap(voxel_size=voxel_size, enable_sor=enable_sor)
+            track_id, OnlineVoxelMap(voxel_size=voxel_size, enable_sor=enable_sor)
         )
         voxel_map.add_points(points)
 
@@ -541,6 +575,7 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
         frame_id = int(payload["frame_id"])
         image = np.asarray(payload["image"])
         masks = payload["masks"]
+        object_states = payload["object_states"]
         point_cloud = np.asarray(payload["point_cloud"], dtype=np.float32)
         intrinsic = np.asarray(payload["intrinsic"], dtype=np.float32)
         extrinsic = np.asarray(payload["extrinsic"], dtype=np.float32)
@@ -597,6 +632,7 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
         _update_track_voxel_maps(
             track_clouds,
             voxel_maps,
+            _dynamic_track_ids_from_masks(masks, object_states),
             voxel_size=track_accum_voxel_size,
             enable_sor=enable_sor,
         )

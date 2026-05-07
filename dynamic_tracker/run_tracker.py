@@ -60,8 +60,8 @@ def _sort_key(path: Path) -> tuple[int, str]:
         return 10**12, path.name
 
 
-def parse_dynamic_classes(class_status_file: Path) -> list[str]:
-    dynamic_classes = []
+def parse_class_statuses(class_status_file: Path) -> dict[str, str]:
+    class_statuses = {}
     with class_status_file.open("r", encoding="utf-8") as f:
         for line_no, raw_line in enumerate(f, start=1):
             line = raw_line.strip()
@@ -79,13 +79,17 @@ def parse_dynamic_classes(class_status_file: Path) -> list[str]:
                 raise ValueError(
                     f"Bad status on line {line_no}: expected 'static' or 'dynamic'"
                 )
-            if status == "dynamic":
-                dynamic_classes.append(class_name)
+            class_statuses[class_name] = status
 
-    if not dynamic_classes:
-        raise ValueError("No dynamic classes found in dynamic classes file")
+    if not class_statuses:
+        raise ValueError("No classes found in dynamic classes file")
 
-    return dynamic_classes
+    return class_statuses
+
+
+def parse_dynamic_classes(class_status_file: Path) -> list[str]:
+    class_statuses = parse_class_statuses(class_status_file)
+    return [name for name, status in class_statuses.items() if status == "dynamic"]
 
 
 def read_images(image_dir: Path) -> list[np.ndarray]:
@@ -213,6 +217,7 @@ def save_tracker_outputs(
     all_tracks: list[Any],
     images: list[np.ndarray],
     da3_frame_data: list[dict[str, np.ndarray]],
+    object_states: dict[str, str],
 ) -> Path:
     logger.info("Saving tracker outputs to %s", save_path)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -247,6 +252,7 @@ def save_tracker_outputs(
             image=np.asarray(image),
             masks=dict(masks_by_class),
             embeddings=dict(embeddings_by_class),
+            object_states=object_states,
             point_cloud=np.asarray(
                 da3_frame_data[frame_idx]["point_cloud"], dtype=np.float32
             ),
@@ -301,7 +307,10 @@ def main() -> None:
     from tracker import Simple3DTracker
     from track_vis_utils import get_current_tracks
 
-    dynamic_classes = parse_dynamic_classes(args.dynamic_classes)
+    object_states = parse_class_statuses(args.dynamic_classes)
+    dynamic_classes = [
+        class_name for class_name, status in object_states.items() if status == "dynamic"
+    ]
     logger.info("Dynamic classes: %s", ", ".join(dynamic_classes))
 
     images = read_images(args.image_folder)
@@ -415,7 +424,7 @@ def main() -> None:
 
     logger.info("Collecting final tracks")
     all_tracks = get_current_tracks(tracker)
-    save_tracker_outputs(args.save_path, all_tracks, images, da3_frame_data)
+    save_tracker_outputs(args.save_path, all_tracks, images, da3_frame_data, object_states)
     logger.info("Done")
 
 
