@@ -46,9 +46,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--embedding-type",
-        required=True,
+        default="dino",
         choices=("dino", "sam3"),
-        help="Appearance embedding source to use for association",
+        help="Appearance embedding source to use for association (default: dino)",
     )
     return parser.parse_args()
 

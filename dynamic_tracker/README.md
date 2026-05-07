@@ -95,8 +95,10 @@ python dynamic_tracker/run_tracker.py \
   <da3_outputs> \
   [save_path] \
   --dynamic-classes <objects_static_dynamic.txt> \
-  --embedding-type {dino,sam3}
+  [--embedding-type {dino,sam3}]
 ```
+
+`--embedding-type` defaults to `dino`.
 
 Expected `sam3_outputs` layout:
 
@@ -146,8 +148,7 @@ Run directly through `start.sh`:
   data/0/sam3_outputs \
   data/0/da3_outputs \
   data/0/tracker_outputs \
-  --dynamic-classes data/0/objects_static_dynamic.txt \
-  --embedding-type dino
+  --dynamic-classes data/0/objects_static_dynamic.txt
 ```
 
 Using SAM3 embeddings instead of DINO:

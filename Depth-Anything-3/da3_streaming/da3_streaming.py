@@ -130,8 +130,9 @@ def remove_duplicates(data_list):
 
 
 class DA3_Streaming:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(self, image_dir, save_dir, config, chunk_param_mode="dynamic"):
         self.config = config
+        self.chunk_param_mode = chunk_param_mode
 
         self.chunk_size = self.config["Model"]["chunk_size"]
         self.overlap = self.config["Model"]["overlap"]
@@ -709,7 +710,40 @@ class DA3_Streaming:
             raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
         print(f"Found {len(self.img_list)} images")
 
+        if self.chunk_param_mode == "dynamic":
+            self.set_dynamic_chunk_params(len(self.img_list))
+        else:
+            print(
+                "Using DA3 params from config: "
+                f"chunk_size={self.chunk_size}, "
+                f"overlap={self.overlap}, "
+                f"loop_chunk_size={self.config['Model']['loop_chunk_size']}"
+            )
+
         self.process_long_sequence()
+
+    def set_dynamic_chunk_params(self, num_frames):
+        if num_frames < 3:
+            raise ValueError(
+                f"[SETTING ERROR] DA3-Streaming needs at least 3 images for dynamic "
+                f"chunking, found {num_frames}."
+            )
+
+        self.chunk_size = 350 if num_frames > 350 else num_frames - 1
+        self.overlap = self.chunk_size // 2
+        self.overlap_s = 0
+        self.overlap_e = self.overlap - self.overlap_s
+
+        self.config["Model"]["chunk_size"] = self.chunk_size
+        self.config["Model"]["overlap"] = self.overlap
+        self.config["Model"]["loop_chunk_size"] = self.chunk_size // 2
+
+        print(
+            "Dynamic DA3 params: "
+            f"chunk_size={self.chunk_size}, "
+            f"overlap={self.overlap}, "
+            f"loop_chunk_size={self.config['Model']['loop_chunk_size']}"
+        )
 
     def save_camera_poses(self):
         """
@@ -889,6 +923,15 @@ if __name__ == "__main__":
         help="Image path",
     )
     parser.add_argument("--output_dir", type=str, required=False, default=None, help="Output path")
+    parser.add_argument(
+        "--chunk-param-mode",
+        choices=["dynamic", "config"],
+        default="dynamic",
+        help=(
+            "Use dynamic chunk/overlap/loop_chunk_size based on frame count, "
+            "or use values from the config file unchanged."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -911,7 +954,9 @@ if __name__ == "__main__":
     if config["Model"]["align_lib"] == "numba":
         warmup_numba()
 
-    da3_streaming = DA3_Streaming(image_dir, save_dir, config)
+    da3_streaming = DA3_Streaming(
+        image_dir, save_dir, config, chunk_param_mode=args.chunk_param_mode
+    )
     da3_streaming.run()
     da3_streaming.close()
 
