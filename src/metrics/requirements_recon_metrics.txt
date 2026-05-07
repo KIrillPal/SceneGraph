@@ -1,0 +1,7 @@
+# Extra deps for recon_metrics (ARKit GT vs DA3).
+# Base layer: requirements.txt in this directory (numpy, scipy, opencv, rerun-sdk, tqdm, trimesh).
+
+PyYAML
+matplotlib
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

@@ -1,0 +1,83 @@
+# Default reconstruction metrics. Override with --scene-dir / --da3-dir or your own YAML.
+
+# Console: stage messages; tqdm bars for NP/GT depth (disable with --quiet).
+progress: true
+verbose: true
+
+scene_dir: null
+# DA3 streaming output root: contains results_output/, camera_poses.txt, pcd/combined_pcd.ply
+da3_dir: null
+# Legacy: path to a single da3.pt (optional if da3_dir is set)
+prediction_pt: null
+# Override point cloud (default: <da3_dir>/pcd/combined_pcd.ply when da3_dir is used)
+prediction_ply: null
+# Root for bundle layout: metrics/{metrics.json,metrics.yaml}, plots/, rrd/<video_id>.rrd
+output_dir: null
+max_frames: null
+
+# Parent of per-scene DA3 dirs (<video_id>/…). If set, scene_dir = raw/Validation (not one video).
+batch_da3_dir: null
+
+# Batch only: overall/metrics.{json,yaml} = mean of scalar metrics over OK scenes; mean curves need plot_charts.
+batch_overall:
+  # Include frame index k in mean curves only if at least this many episodes still have data at k.
+  min_videos_for_mean: 3
+  # If false, skip overall/plots/mean_*.png (still writes overall metrics files when batch finishes).
+  write_mean_plots: true
+
+# auto: TAE uses CUDA when PyTorch reports a GPU; otherwise CPU. Override with cuda or cpu.
+device: auto
+
+# If true and da3_dir contains da3.pt, load the .pt file; if false, always read npz + poses.
+prediction:
+  prefer_da3_pt: true
+
+skip_odometry: false
+skip_tae: false
+skip_depth: false
+skip_cloud: false
+
+alignment:
+  sim3: true
+
+# Absolute rotation error (ARE) and relative pose error (RPE) vs GT after Sim(3) trajectory alignment.
+pose_error:
+  # Frame interval for RPE pairs (i → i + delta).
+  rpe_delta: 1
+
+depth:
+  depth_mm_to_m: 0.001
+  min_depth: 0.001
+  max_depth: 80.0
+  # median: per-frame scale pred to match GT (standard for monocular). "none" for raw scale.
+  scale_align: median
+  delta_thresh: 1.25
+  eps: 1.0e-8
+
+cloud:
+  chamfer_max_points_a: 50000
+  chamfer_max_points_b: 50000
+  emd_max_points: 512
+  emd_seed: 0
+
+tae:
+  min_depth: 1.0e-4
+  # Approximate TAE: random source pixels per warp (omit or null = full image). e.g. 65536
+  warp_source_samples: 50000
+  warp_sample_seed: 0
+  # null = use top-level device
+  device: null
+  # Sliding-window length for TAE sequence plots (plot_charts); default 2.
+  # tae_window_size: 2
+
+# Rerun .rrd (rerun-sdk): GT + aligned pred point clouds, both camera tracks, depth difference.
+plot_rrd: false
+# plot_rrd_path: null
+# Or use a mapping, e.g. plot_rrd: { path: /tmp/scene.rrd, max_points_gt: 400000, diff_vmax_m: 0.35 }
+
+# Matplotlib: TAE sliding-window curve (tae_sequence.png), depth per frame, alignment error.
+# Default dir with output_dir: <output_dir>/plots/
+plot_charts: false
+# plot_charts_dir: null
+# plot_charts: { charts_dir: /tmp/out, tae_window_size: 3 }
+# tae_window_size for charts may also live under tae: { tae_window_size: 2 }.

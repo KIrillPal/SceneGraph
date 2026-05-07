@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/workspace/tmp_scripts
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY requirements.txt /tmp/requirements.txt
+COPY requirements_recon_metrics.txt /tmp/requirements_recon_metrics.txt
+RUN python -m pip install --upgrade pip && \
+    python -m pip install -r /tmp/requirements.txt && \
+    python -m pip install -r /tmp/requirements_recon_metrics.txt
+
+ENTRYPOINT ["python", "-m", "recon_metrics"]

@@ -130,7 +130,7 @@ def remove_duplicates(data_list):
 
 
 class DA3_Streaming:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(self, image_dir, save_dir, config, device=None):
         self.config = config
 
         self.chunk_size = self.config["Model"]["chunk_size"]
@@ -139,7 +139,10 @@ class DA3_Streaming:
         self.overlap_e = self.overlap - self.overlap_s
         self.conf_threshold = 1.5
         self.seed = 42
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device is not None:
+            self.device = device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = (
             torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         )
@@ -264,7 +267,6 @@ class DA3_Streaming:
             "ref_view_strategy" if not is_loop else "ref_view_strategy_loop"
         ]
 
-        torch.cuda.empty_cache()
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=self.dtype):
                 images = chunk_image_paths
@@ -280,8 +282,6 @@ class DA3_Streaming:
                 print(predictions.conf.shape)  # [N, H, W] float32
                 print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
                 print(predictions.intrinsics.shape)  # [N, 3, 3] float32
-        torch.cuda.empty_cache()
-
         # Save predictions to disk instead of keeping in memory
         if is_loop:
             save_dir = self.result_loop_dir
@@ -540,7 +540,6 @@ class DA3_Streaming:
             cur_predictions = self.process_single_chunk(
                 self.chunk_indices[chunk_idx], chunk_idx=chunk_idx
             )
-            torch.cuda.empty_cache()
 
             if chunk_idx > 0:
                 print(
@@ -889,6 +888,7 @@ if __name__ == "__main__":
         help="Image path",
     )
     parser.add_argument("--output_dir", type=str, required=False, default=None, help="Output path")
+    parser.add_argument("--device", type=str, required=False, default=None, help="Device to use")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -911,7 +911,7 @@ if __name__ == "__main__":
     if config["Model"]["align_lib"] == "numba":
         warmup_numba()
 
-    da3_streaming = DA3_Streaming(image_dir, save_dir, config)
+    da3_streaming = DA3_Streaming(image_dir, save_dir, config, device=args.device)
     da3_streaming.run()
     da3_streaming.close()
 
