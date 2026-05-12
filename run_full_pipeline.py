@@ -49,6 +49,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Pipeline log directory. Defaults to data/<scene-id>/logs",
     )
+    parser.add_argument(
+        "--hf-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Hugging Face cache directory on the server. Absolute paths are used as-is; "
+            "relative paths are resolved from the repo root. Defaults to $HF_CACHE_DIR or .cache/huggingface."
+        ),
+    )
+    parser.add_argument(
+        "--hf-token",
+        default=None,
+        help="Hugging Face token. Defaults to $HF_TOKEN or $HUGGING_FACE_HUB_TOKEN.",
+    )
 
     parser.add_argument("--skip-frame-extraction", action="store_true")
     parser.add_argument("--skip-keyframes", action="store_true")
@@ -236,10 +250,55 @@ def user_args() -> list[str]:
     return ["--user", f"{os.getuid()}:{os.getgid()}"]
 
 
-def cache_args() -> list[str]:
-    hf_cache = Path(os.environ.get("HF_CACHE_DIR", Path.home() / ".cache" / "huggingface")).expanduser()
-    hf_cache.mkdir(parents=True, exist_ok=True)
-    return ["-e", "HF_HOME=/tmp/hf_cache", "-v", f"{hf_cache}:/tmp/hf_cache"]
+def resolve_hf_cache_dir(path: Path | None) -> Path:
+    if path is None:
+        env_path = os.environ.get("HF_CACHE_DIR")
+        path = Path(env_path) if env_path else REPO_ROOT / ".cache" / "huggingface"
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def validate_writable_dir(path: Path, label: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise PermissionError(f"{label} is not writable by current user: {path}") from exc
+
+
+def configure_hf(args: argparse.Namespace) -> None:
+    args.hf_cache_dir = resolve_hf_cache_dir(args.hf_cache_dir)
+    validate_writable_dir(args.hf_cache_dir, "HF cache directory")
+
+    token = args.hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    args.hf_token_present = bool(token)
+    if token:
+        os.environ["HF_TOKEN"] = token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+
+
+def hf_env_args(args: argparse.Namespace) -> list[str]:
+    env_args = [
+        "-e",
+        "HF_CACHE_DIR=/tmp/hf_cache",
+        "-e",
+        "HF_HOME=/tmp/hf_cache",
+        "-e",
+        "HF_HUB_CACHE=/tmp/hf_cache/hub",
+        "-e",
+        "HUGGINGFACE_HUB_CACHE=/tmp/hf_cache/hub",
+        "-e",
+        "TRANSFORMERS_CACHE=/tmp/hf_cache/transformers",
+        "-v",
+        f"{args.hf_cache_dir}:/tmp/hf_cache",
+    ]
+    if args.hf_token_present:
+        env_args.extend(["-e", "HF_TOKEN", "-e", "HUGGING_FACE_HUB_TOKEN"])
+    return env_args
 
 
 def cotracker_cache_args() -> list[str]:
@@ -253,7 +312,7 @@ def cotracker_cache_args() -> list[str]:
     ]
 
 
-def docker_pipeline_base(image: str, worker_gpu: str, data_root: Path) -> list[str]:
+def docker_pipeline_base(image: str, worker_gpu: str, data_root: Path, args: argparse.Namespace) -> list[str]:
     return [
         "docker",
         "run",
@@ -264,7 +323,7 @@ def docker_pipeline_base(image: str, worker_gpu: str, data_root: Path) -> list[s
         *user_args(),
         "-e",
         "HOME=/tmp",
-        *cache_args(),
+        *hf_env_args(args),
         "-v",
         f"{REPO_ROOT}:/workspace",
         "-v",
@@ -299,7 +358,7 @@ def run_frame_extraction(args: argparse.Namespace, worker_gpu: str, scene_dir: P
         print(f"Skipping frame extraction; found images in {images_dir}")
         return
 
-    cmd = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root) + [
+    cmd = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root, args) + [
         "python",
         "utils/video_to_frames.py",
         str(rel_to_repo(video_path)),
@@ -325,7 +384,7 @@ def run_keyframes(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) ->
         print(f"Skipping keyframe selection; found selected frames in {selected_dir}")
         return
 
-    cmd = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root) + [
+    cmd = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root, args) + [
         "python",
         "MaxInfo/pvsg_maxinfo_filter.py",
         "--input_dir",
@@ -367,8 +426,6 @@ def wait_for_qwen(port: int, timeout: int) -> None:
 
 def start_qwen(args: argparse.Namespace, qwen_gpu: str, container_name: str) -> subprocess.Popen | None:
     run_cmd(["docker", "rm", "-f", container_name], dry_run=args.dry_run, check=False)
-    hf_cache = Path(os.environ.get("HF_CACHE_DIR", Path.home() / ".cache" / "huggingface")).expanduser()
-    hf_cache.mkdir(parents=True, exist_ok=True)
     cmd = [
         "docker",
         "run",
@@ -379,14 +436,14 @@ def start_qwen(args: argparse.Namespace, qwen_gpu: str, container_name: str) -> 
         "--gpus",
         f"device={qwen_gpu}",
         "--ipc=host",
+        *user_args(),
         "-p",
         f"{args.qwen_port}:8000",
         "-e",
-        "FLASHINFER_DISABLE_VERSION_CHECK=1",
+        "HOME=/tmp",
         "-e",
-        "HF_HOME=/root/.cache/huggingface",
-        "-v",
-        f"{hf_cache}:/root/.cache/huggingface",
+        "FLASHINFER_DISABLE_VERSION_CHECK=1",
+        *hf_env_args(args),
         "-v",
         f"{REPO_ROOT}:/workspace",
         "-w",
@@ -511,6 +568,7 @@ def run_da3(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> None:
         *user_args(),
         "-e",
         "HOME=/tmp",
+        *hf_env_args(args),
         "-v",
         f"{da3_dir}:/workspace/da3_streaming",
         "-v",
@@ -555,7 +613,7 @@ def run_sam3(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> None
         *user_args(),
         "-e",
         "HOME=/tmp",
-        *cache_args(),
+        *hf_env_args(args),
         "-v",
         f"{REPO_ROOT / 'sam3'}:/workspace/sam3",
         "-v",
@@ -584,7 +642,7 @@ def run_tracker(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> N
         return
     remove_if_overwrite(output_dir, args.overwrite)
 
-    base = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root)
+    base = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root, args)
     cmd = base[:-1] + cotracker_cache_args() + [base[-1],
         "python",
         "dynamic_tracker/run_tracker.py",
@@ -612,6 +670,8 @@ def main() -> None:
     except ValueError as exc:
         raise ValueError("--data-root must be inside the repository for current container path mapping") from exc
 
+    configure_hf(args)
+
     scene_id = args.scene_id or args.video.stem
     scene_dir = args.data_root / scene_id
     video_path = copy_video(args.video, scene_dir, args.overwrite, args.dry_run)
@@ -637,6 +697,8 @@ def main() -> None:
             "sam3_image": args.sam3_image,
             "qwen_image": args.qwen_image,
             "qwen_model": args.qwen_model,
+            "hf_cache_dir": str(args.hf_cache_dir),
+            "hf_token_present": args.hf_token_present,
         },
         "stages": {},
     }
@@ -644,6 +706,8 @@ def main() -> None:
 
     print(f"Scene directory: {scene_dir}")
     print(f"Log directory: {log_dir}")
+    print(f"HF cache directory: {args.hf_cache_dir}")
+    print(f"HF token present: {args.hf_token_present}")
     print(f"Worker GPU: {worker_gpu}; Qwen GPU: {qwen_gpu}")
 
     try:
