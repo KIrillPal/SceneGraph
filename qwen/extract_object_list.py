@@ -16,6 +16,7 @@ except ImportError:
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+EXCLUDED_OBJECT_NAMES = {"road", "floor", "ceiling", "wall", "grass"}
 
 def natural_key(path: Path) -> list[int | str]:
     parts = re.split(r"(\d+)", path.name)
@@ -120,6 +121,8 @@ def parse_objects(assistant_text: str) -> list[tuple[str, str]]:
         if not name or state not in {"static", "dynamic"}:
             continue
         name = re.sub(r"\s+", " ", name)
+        if name in EXCLUDED_OBJECT_NAMES:
+            continue
         if name in seen:
             continue
         parsed.append((name, state))
