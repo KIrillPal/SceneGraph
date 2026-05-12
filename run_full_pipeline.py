@@ -410,10 +410,49 @@ def qwen_endpoint(port: int) -> str:
     return f"http://localhost:{port}/v1/chat/completions"
 
 
-def wait_for_qwen(port: int, timeout: int) -> None:
+def get_container_status(container_name: str) -> str | None:
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", container_name],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def append_qwen_logs(container_name: str) -> None:
+    if ACTIVE_LOG_FILE is None:
+        return
+    result = subprocess.run(
+        ["docker", "logs", container_name],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    append_log("\n=== qwen docker logs snapshot ===\n")
+    append_log(result.stdout)
+
+
+def wait_for_qwen(port: int, timeout: int, container_name: str | None = None) -> None:
     deadline = time.time() + timeout
     url = qwen_health_url(port)
     while time.time() < deadline:
+        if container_name is not None:
+            status = get_container_status(container_name)
+            if status is None:
+                raise RuntimeError(f"Qwen container disappeared before becoming ready: {container_name}")
+            if status not in {"created", "running"}:
+                append_qwen_logs(container_name)
+                raise RuntimeError(
+                    f"Qwen container exited before becoming ready: {container_name} status={status}"
+                )
+
         try:
             with request.urlopen(url, timeout=5) as response:
                 if response.status < 500:
@@ -421,6 +460,8 @@ def wait_for_qwen(port: int, timeout: int) -> None:
         except (OSError, error.URLError):
             pass
         time.sleep(5)
+    if container_name is not None:
+        append_qwen_logs(container_name)
     raise TimeoutError(f"Qwen server did not become ready within {timeout}s: {url}")
 
 
@@ -430,13 +471,11 @@ def start_qwen(args: argparse.Namespace, qwen_gpu: str, container_name: str) -> 
         "docker",
         "run",
         "-d",
-        "--rm",
         "--name",
         container_name,
         "--gpus",
         f"device={qwen_gpu}",
         "--ipc=host",
-        *user_args(),
         "-p",
         f"{args.qwen_port}:8000",
         "-e",
@@ -470,10 +509,9 @@ def start_qwen(args: argparse.Namespace, qwen_gpu: str, container_name: str) -> 
         logs_file.close()
     if not args.dry_run:
         try:
-            wait_for_qwen(args.qwen_port, args.qwen_timeout)
+            wait_for_qwen(args.qwen_port, args.qwen_timeout, container_name)
         except Exception:
-            if logs_process is not None:
-                logs_process.terminate()
+            stop_logs_process(logs_process)
             raise
     return logs_process
 
@@ -516,8 +554,8 @@ def run_qwen_objects(args: argparse.Namespace, qwen_gpu: str, scene_dir: Path) -
     qwen_logs_process = None
     try:
         if args.start_qwen:
-            qwen_logs_process = start_qwen(args, qwen_gpu, container_name)
             started = True
+            qwen_logs_process = start_qwen(args, qwen_gpu, container_name)
         elif not args.dry_run:
             wait_for_qwen(args.qwen_port, 30)
 
