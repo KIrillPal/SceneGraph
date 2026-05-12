@@ -11,6 +11,8 @@ import torch
 import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
+from config_loader import cfg
+
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -46,9 +48,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--embedding-type",
-        default="dinov3",
+        default=cfg.dino.version,
         choices=("dinov2", "dinov3", "sam"),
-        help="Appearance embedding source to use for association (default: dinov3)",
+        help=f"Appearance embedding source to use for association (default: {cfg.dino.version})",
     )
     return parser.parse_args()
 
@@ -167,10 +169,15 @@ def get_dense_da3_frame_data(
     depth_dir: Path,
     extrinsics: list[np.ndarray],
     num_frames: int,
-    conf_thresh_mul: float = 0.5,
+    conf_thresh_mul: float | None = None,
 ) -> list[dict[str, np.ndarray]]:
     from point_utils import depth_to_point_cloud_vectorized
 
+    conf_thresh_mul = (
+        cfg.point_cloud.da3_conf_thresh_mul
+        if conf_thresh_mul is None
+        else conf_thresh_mul
+    )
     frame_data = []
 
     logger.info("Getting dense DA3 frame data from %s", depth_dir)
@@ -229,9 +236,30 @@ def save_tracker_outputs(
     ):
         masks_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
         embeddings_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
+        keypoints_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
+        moving_keypoints_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
+        keypoint_vis: dict[int, dict[str, object]] = {}
 
         for track in all_tracks:
             track_id = int(track.id)
+            keypoints = track.keypoints.get(frame_idx)
+            moving_keypoints = track.moving_keypoints.get(frame_idx)
+            keypoint_vis[track_id] = {
+                "class_name": track_labels[track_id],
+                "is_dynamic": bool(getattr(track, "is_dynamic", False)),
+                "motion_state": str(getattr(track.motion_state, "status", "UNKNOWN")),
+                "keypoints": (
+                    np.asarray(keypoints, dtype=np.float32).reshape(-1, 2)
+                    if keypoints is not None
+                    else None
+                ),
+                "moving_keypoints": (
+                    np.asarray(moving_keypoints, dtype=np.float32).reshape(-1, 2)
+                    if moving_keypoints is not None
+                    else None
+                ),
+            }
+
             mask = track.masks.get(frame_idx)
             if mask is None:
                 continue
@@ -245,6 +273,16 @@ def save_tracker_outputs(
                     embedding, dtype=np.float32
                 ).reshape(-1)
 
+            if keypoints is not None:
+                keypoints_by_class[class_name][track_id] = np.asarray(
+                    keypoints, dtype=np.float32
+                ).reshape(-1, 2)
+
+            if moving_keypoints is not None:
+                moving_keypoints_by_class[class_name][track_id] = np.asarray(
+                    moving_keypoints, dtype=np.float32
+                ).reshape(-1, 2)
+
         frame_file = save_path / f"frame_{frame_idx:06d}.npz"
         np.savez_compressed(
             frame_file,
@@ -252,6 +290,9 @@ def save_tracker_outputs(
             image=np.asarray(image),
             masks=dict(masks_by_class),
             embeddings=dict(embeddings_by_class),
+            keypoints=dict(keypoints_by_class),
+            moving_keypoints=dict(moving_keypoints_by_class),
+            keypoint_vis=keypoint_vis,
             object_states=object_states,
             point_cloud=np.asarray(
                 da3_frame_data[frame_idx]["point_cloud"], dtype=np.float32
@@ -341,7 +382,9 @@ def main() -> None:
     logger.info("Getting text embeddings")
     text_embs = get_text_embeddings(tracks)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = cfg.tracking.device
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
     logger.info("Building video tensor on %s", device)
     video_tensor = build_video_tensor(images)
 
@@ -357,7 +400,7 @@ def main() -> None:
         device=device,
         dynamic_classes_list=dynamic_classes,
         intrinsics_list=intrinsics,
-        extrinsics_list=tracker_extrinsics,
+        extrinsics_list=[np.linalg.inv(pose) for pose in tracker_extrinsics],
     )
 
     frame_progress = tqdm(
@@ -373,7 +416,7 @@ def main() -> None:
 
         if args.embedding_type in {"dinov2", "dinov3"}:
             visual_embeddings = dino_extractor.extract_from_frame(
-                image=images[frame_idx], masks=frame_masks, batch_size=32
+                image=images[frame_idx], masks=frame_masks, batch_size=cfg.dino.batch_size
             )
         else:
             visual_embeddings = None

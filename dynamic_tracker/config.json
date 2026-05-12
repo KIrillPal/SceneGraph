@@ -1,0 +1,105 @@
+{
+  "tracking": {
+    "device": "cuda",
+    "dynamic_classes": ["car", "person"]
+  },
+  "motion": {
+    "t_start": 0.07,
+    "t_stop": 0.03,
+    "velocity_buffer_size": 10
+  },
+  "voxel_map": {
+    "voxel_size": 0.05,
+    "alpha": 0.3,
+    "max_age": 300,
+    "max_age_moving": 5
+  },
+  "association": {
+    "ass_threshold": 0.5,
+    "lost_ass_threshold": 0.45,
+    "tentative_ass_threshold": 0.55,
+    "max_dist_multiplier": 3.0,
+    "use_keypoint_overlap": true,
+    "keypoint_overlap_min": 0.3,
+    "keypoint_overlap_bonus": 0.3
+  },
+  "embeddings": {
+    "text_threshold": 0.75,
+    "visual_threshold": 0.7,
+    "vis_embedding_dim": 384,
+    "text_embedding_dim": 384
+  },
+  "track_lifecycle": {
+    "max_tentative_age": 20,
+    "max_active_frames": 20,
+    "min_hits_to_activate": 10
+  },
+  "cotracker": {
+    "checkpoint_path": "co-tracker/checkpoints/scaled_online.pth",
+    "window_len": 16,
+    "visibility_thresh": 0.7,
+    "min_keypoints_for_transform": 10,
+    "min_keypoints_visible": 3,
+    "max_rmse": 0.1
+  },
+  "object_size": {
+    "use_detection_size_for_moving": true,
+    "min_object_size": 0.2,
+    "size_smoothing_alpha": 0.3,
+    "max_size_increase_factor": 2.0
+  },
+  "visibility": {
+    "outside_frame_margin": 50
+  },
+  "similarity_weights": {
+    "static": {
+      "emb": 0.4,
+      "ioa": 0.4,
+      "dist": 0.2
+    },
+    "dynamic": {
+      "emb": 0.4,
+      "ioa": 0.3,
+      "dist": 0.3,
+      "keypoint": 0.0
+    }
+  },
+  "dino": {
+    "version": "dinov3",
+    "model_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
+    "dinov2_model_name": "vit_small_patch14_dinov2",
+    "dinov3_model_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
+    "input_size": 518,
+    "embedding_dim": 384,
+    "crop_margin": 0.2,
+    "mask_dilation_kernel": 5,
+    "background_blur": 15,
+    "batch_size": 32,
+    "device": "cuda"
+  },
+  "point_cloud": {
+    "sor_k": 10,
+    "sor_std_ratio": 1.5,
+    "da3_conf_thresh_mul": 0.5
+  },
+  "feature_extraction": {
+    "text_model_name": "all-MiniLM-L6-v2",
+    "mask_resize": [72, 72],
+    "epsilon": 1e-8,
+    "pc_target_h": 378,
+    "pc_target_w": 504,
+    "max_keypoints": 100,
+    "keypoint_quality": 0.01,
+    "keypoint_min_dist": 2
+  },
+  "clip": {
+    "model_name": "ViT-B/32",
+    "input_size": 224,
+    "embedding_dim": 512,
+    "crop_margin": 0.2,
+    "mask_dilation_kernel": 5,
+    "background_blur": 15,
+    "batch_size": 32,
+    "device": "cuda"
+  }
+}

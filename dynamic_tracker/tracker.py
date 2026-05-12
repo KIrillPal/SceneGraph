@@ -17,69 +17,44 @@ from metric_utils import (
     calc_voxel_similarity,
     compute_object_size
 )
+from config_loader import cfg
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Any
 from cotracker.predictor import CoTrackerOnlinePredictor
 
 
 # ============================================================================
-# CONSTANTS
-# ============================================================================
-
-class Config:
-    """Tracking configuration parameters."""
-    # Motion detection
-    T_START = 0.07
-    T_STOP = 0.03
-    VELOCITY_BUFFER_SIZE = 10
-    
-    # Voxel map
-    VOXEL_SIZE = 0.05
-    VOXEL_ALPHA = 0.3
-    VOXEL_MAX_AGE = 300
-    VOXEL_MAX_AGE_MOVING = 5
-    
-    # Association thresholds
-    ASS_THRESHOLD = 0.45
-    LOST_ASS_THRESHOLD = 0.4
-    TENTATIVE_ASS_THRESHOLD = 0.55
-    TEXT_EMB_THRESHOLD = 0.75
-    VISUAL_EMB_THRESHOLD = 0.75
-    MAX_DIST_MULTIPLIER = 4
-    
-    # Track lifecycle
-    MAX_TENTATIVE_AGE = 20
-    MAX_ACTIVE_FRAMES = 20
-    MIN_HITS_TO_ACTIVATE = 10
-    
-    # CoTracker
-    COTRACKER_WINDOW_LEN = 16
-    COTRACKER_VISIBILITY_THRESH = 0.7
-    MIN_KEYPOINTS_FOR_TRANSFORM = 10
-    MIN_KEYPOINTS_VISIBLE = 3
-    MAX_RMSE = 0.1
-
-    # Embeddings
-    VIS_EMBEDDING_DIM = 384
-    TEXT_EMBEDDING_DIM = 384
-    
-    # Object size
-    USE_DETECTION_SIZE_FOR_MOVING = True
-    MIN_OBJECT_SIZE = 0.2
-    SIZE_SMOOTHING_ALPHA = 0.3
-    MAX_SIZE_INCREASE_FACTOR = 2.0
-    
-    # === VISIBILITY (dynamic objects only) ===
-    OUTSIDE_FRAME_MARGIN = 50  # Pixels outside frame to consider "outside"
-
-
-
-
-# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _ensure_embedding_2d(emb_array: np.ndarray, expected_dim: int = Config.TEXT_EMBEDDING_DIM) -> np.ndarray:
+def _project_3d_points_to_2d(
+    points_3d: np.ndarray,
+    intrinsics: np.ndarray,
+    extrinsics: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Batch-project 3D world points to 2D image coordinates."""
+    if len(points_3d) == 0:
+        return np.zeros((0, 2)), np.array([], dtype=bool)
+
+    if extrinsics.shape == (3, 4):
+        ext_4x4 = np.eye(4)
+        ext_4x4[:3, :] = extrinsics
+    else:
+        ext_4x4 = extrinsics
+
+    pts_homo = np.hstack([points_3d, np.ones((len(points_3d), 1))])
+    pts_cam = (ext_4x4 @ pts_homo.T).T[:, :3]
+    valid_front = pts_cam[:, 2] > 1e-6
+
+    final_2d = np.full((len(points_3d), 2), -1.0)
+    if np.any(valid_front):
+        pts_img = intrinsics @ pts_cam[valid_front].T
+        final_2d[valid_front] = (pts_img[:2] / pts_img[2]).T
+
+    return final_2d, valid_front
+
+
+def _ensure_embedding_2d(emb_array: np.ndarray, expected_dim: int = cfg.embeddings.text_embedding_dim) -> np.ndarray:
     """Ensure embedding array is 2D (N, D)."""
     if len(emb_array) == 0:
         return np.zeros((0, expected_dim))
@@ -288,7 +263,7 @@ class ObjectState:
         self.v_buffer.append(velocity)
         self.size_buffer.append(size)
         
-        if len(self.v_buffer) > Config.VELOCITY_BUFFER_SIZE:
+        if len(self.v_buffer) > cfg.motion.velocity_buffer_size:
             self.v_buffer.pop(0)
             self.size_buffer.pop(0)
         
@@ -298,10 +273,10 @@ class ObjectState:
         normalized_velocity = self.v_avg / self.size_avg
         
         if self.status == "STATIC":
-            if normalized_velocity > Config.T_START:
+            if normalized_velocity > cfg.motion.t_start:
                 self.status = "MOVING"
         else:
-            if normalized_velocity < Config.T_STOP:
+            if normalized_velocity < cfg.motion.t_stop:
                 self.status = "STATIC"
         
         return self.status
@@ -312,9 +287,9 @@ class VoxelMap:
     
     def __init__(
         self,
-        voxel_size: float = Config.VOXEL_SIZE,
-        alpha: float = Config.VOXEL_ALPHA,
-        max_age: int = Config.VOXEL_MAX_AGE
+        voxel_size: float = cfg.voxel_map.voxel_size,
+        alpha: float = cfg.voxel_map.alpha,
+        max_age: int = cfg.voxel_map.max_age
     ):
         self.voxel_size = voxel_size
         self.alpha = alpha
@@ -432,13 +407,13 @@ class Track:
         self.size_history = deque(maxlen=10)
         self.size_history.append(self.detection_size)
         self.use_detection_size = (
-            Config.USE_DETECTION_SIZE_FOR_MOVING and is_dynamic
+            cfg.object_size.use_detection_size_for_moving and is_dynamic
         )
         
         # State machine
         self.state = "tentative"
         self.hits = 1
-        self.min_hits_to_activate = Config.MIN_HITS_TO_ACTIVATE
+        self.min_hits_to_activate = cfg.track_lifecycle.min_hits_to_activate
         self.time_since_update = 0
         
         # Per-frame data
@@ -462,24 +437,27 @@ class Track:
         self.cotracker_is_visible = True
         self.predicted_pos_2d = None
         self.last_predicted_pos_2d = None
+        self.frames_without_cotracker = 0
+        self.stable_3d_keypoints: Optional[np.ndarray] = None
+        self.last_3d_keypoints: Optional[np.ndarray] = None
     
     @property
     def object_size(self) -> float:
         """Get object size based on motion state."""
         if self.use_detection_size and self.motion_state.status == "MOVING":
-            return max(self.detection_size, Config.MIN_OBJECT_SIZE)
+            return max(self.detection_size, cfg.object_size.min_object_size)
         else:
-            return max(self.voxel_size, Config.MIN_OBJECT_SIZE)
+            return max(self.voxel_size, cfg.object_size.min_object_size)
     
     def update_size(self, detection: Dict[str, Any], frame_idx: int):
         """Update object size from new detection."""
         det_size = compute_object_size(detection["points"])
         
         if self.use_detection_size and self.motion_state.status == "MOVING":
-            max_allowed_size = self.detection_size * Config.MAX_SIZE_INCREASE_FACTOR
+            max_allowed_size = self.detection_size * cfg.object_size.max_size_increase_factor
             det_size = min(det_size, max_allowed_size)
             
-            alpha = Config.SIZE_SMOOTHING_ALPHA
+            alpha = cfg.object_size.size_smoothing_alpha
             self.detection_size = (
                 alpha * det_size + 
                 (1 - alpha) * self.detection_size
@@ -517,7 +495,7 @@ class Track:
         in_frame_y = (track_points[:, 1] >= 0) & (track_points[:, 1] < H)
         in_frame = in_frame_x & in_frame_y
         
-        visible = track_visibilities > Config.COTRACKER_VISIBILITY_THRESH
+        visible = track_visibilities > cfg.cotracker.visibility_thresh
         
         valid_points = np.sum(in_frame & visible)
         total_points = len(track_points)
@@ -531,7 +509,7 @@ class Track:
         
         self.last_predicted_pos_2d = self.predicted_pos_2d.copy() if self.predicted_pos_2d is not None else None
         
-        if valid_points >= max(Config.MIN_KEYPOINTS_VISIBLE, total_points * 0.3):
+        if valid_points >= max(cfg.cotracker.min_keypoints_visible, total_points * 0.3):
             self.visibility_state = "VISIBLE"
             self.cotracker_is_visible = True
         elif low_vis_points >= max(2, total_points * 0.3):
@@ -552,53 +530,82 @@ class Track:
         intrinsics: np.ndarray,
         extrinsics: np.ndarray
     ):
-        """
-        Update visibility for tracks NOT in CoTracker output.
-        
-        Uses track's 3D position + current camera extrinsics to project
-        and check if object might be back in frame.
-        
-        Args:
-            frame_id: Current frame index.
-            H: Frame height.
-            W: Frame width.
-            intrinsics: Camera intrinsics [3, 3].
-            extrinsics: Current frame world-to-camera extrinsics [3, 4].
-        """
+        """Update visibility for tracks absent from CoTracker using camera pose."""
         if not self.is_dynamic:
             self.visibility_state = "VISIBLE"
             self.cotracker_is_visible = True
             return
-        
-        # No 3D position available
-        if self.center_3d is None or len(self.center_3d) == 0:
-            self.visibility_state = "OCCLUDED"
-            self.cotracker_is_visible = False
-            return
-        
-        # Project 3D position to current frame using extrinsics
-        projected_pos_2d = _project_3d_to_2d(
-            self.center_3d,
-            intrinsics,
-            extrinsics
+
+        self.update_moving_keypoints_with_extrinsics(frame_id, intrinsics, extrinsics, H, W)
+
+        if frame_id not in self.moving_keypoints or len(self.moving_keypoints[frame_id]) == 0:
+            if self.center_3d is None or len(self.center_3d) == 0:
+                self.visibility_state = "OCCLUDED"
+                self.cotracker_is_visible = False
+                self.frames_without_cotracker += 1
+                return
+
+            center_keypoint, valid = _project_3d_points_to_2d(
+                self.center_3d.reshape(1, -1), intrinsics, extrinsics
+            )
+            if len(valid) == 0 or not valid[0]:
+                self.visibility_state = "OUTSIDE_FRAME"
+                self.cotracker_is_visible = False
+                self.frames_without_cotracker += 1
+                return
+            self.moving_keypoints[frame_id] = center_keypoint[valid]
+
+        current_keypoints = self.moving_keypoints[frame_id]
+        in_frame = (
+            (current_keypoints[:, 0] >= 0) & (current_keypoints[:, 0] < W) &
+            (current_keypoints[:, 1] >= 0) & (current_keypoints[:, 1] < H)
         )
-        
-        # Update predicted position
-        self.predicted_pos_2d = projected_pos_2d
-        if projected_pos_2d is not None:
-            self.last_predicted_pos_2d = projected_pos_2d.copy()
-        
-        # Check if projected position is in frame
-        if projected_pos_2d is not None and _is_position_in_frame(
-            projected_pos_2d, H, W, margin=Config.OUTSIDE_FRAME_MARGIN
-        ):
-            # Position is in frame - might be occluded but trackable
+        inside_count = np.sum(in_frame)
+        total_count = len(current_keypoints)
+
+        self.predicted_pos_2d = (
+            np.mean(current_keypoints[in_frame], axis=0)
+            if inside_count > 0
+            else np.mean(current_keypoints, axis=0)
+        )
+        self.last_predicted_pos_2d = self.predicted_pos_2d.copy()
+        self.frames_without_cotracker += 1
+
+        if inside_count >= max(cfg.cotracker.min_keypoints_visible, total_count * 0.3):
+            self.visibility_state = "VISIBLE"
+            self.cotracker_is_visible = True
+        elif inside_count >= max(2, total_count * 0.15):
             self.visibility_state = "OCCLUDED"
             self.cotracker_is_visible = True
         else:
-            # Outside frame
             self.visibility_state = "OUTSIDE_FRAME"
             self.cotracker_is_visible = False
+
+    def update_moving_keypoints_with_extrinsics(
+        self,
+        frame_id: int,
+        intrinsics: np.ndarray,
+        extrinsics: np.ndarray,
+        H: int,
+        W: int
+    ) -> None:
+        """Project last valid 3D CoTracker keypoints into the current frame."""
+        if self.last_3d_keypoints is None or len(self.last_3d_keypoints) == 0:
+            return
+
+        keypoints_2d, valid_front = _project_3d_points_to_2d(
+            self.last_3d_keypoints, intrinsics, extrinsics
+        )
+        if len(keypoints_2d) == 0:
+            return
+
+        in_frame = (
+            valid_front &
+            (keypoints_2d[:, 0] >= 0) & (keypoints_2d[:, 0] < W) &
+            (keypoints_2d[:, 1] >= 0) & (keypoints_2d[:, 1] < H)
+        )
+        if np.sum(in_frame) > 0:
+            self.moving_keypoints[frame_id] = keypoints_2d[in_frame]
     
     def should_allow_association(self, visual_sim: float, emb_threshold: float) -> bool:
         """
@@ -656,17 +663,17 @@ class Track:
         
         if update_flags["update_voxels"]:
             if update_flags["use_det_voxels"] and self.motion_state.status == "MOVING":
-                self.voxels = VoxelMap(max_age=Config.VOXEL_MAX_AGE_MOVING)
+                self.voxels = VoxelMap(max_age=cfg.voxel_map.max_age_moving)
             self.voxels.add_points(points)
         elif update_flags["use_det_voxels"] and self.motion_state.status == "MOVING":
-            self.voxels = VoxelMap(max_age=Config.VOXEL_MAX_AGE_MOVING)
+            self.voxels = VoxelMap(max_age=cfg.voxel_map.max_age_moving)
             self.voxels.add_points(points)
         
         if update_flags["re_init"]:
             print(f"Re-init track {self.id}")
-            max_age = (Config.VOXEL_MAX_AGE_MOVING
+            max_age = (cfg.voxel_map.max_age_moving
                       if self.motion_state.status == "MOVING"
-                      else Config.VOXEL_MAX_AGE)
+                      else cfg.voxel_map.max_age)
             self.voxels = VoxelMap(max_age=max_age)
             self.voxels.add_points(points)
         
@@ -772,24 +779,24 @@ class Simple3DTracker:
         self.lost_tracks: List[Track] = []
         self.next_id = 0
         
-        self.ass_threshold = Config.ASS_THRESHOLD
-        self.lost_ass_threshold = Config.LOST_ASS_THRESHOLD
-        self.tentative_ass_threshold = Config.TENTATIVE_ASS_THRESHOLD
-        self.text_emb_threshold = Config.TEXT_EMB_THRESHOLD
-        self.emb_threshold = Config.VISUAL_EMB_THRESHOLD
-        self.max_dist_multiplier = Config.MAX_DIST_MULTIPLIER
+        self.ass_threshold = cfg.association.ass_threshold
+        self.lost_ass_threshold = cfg.association.lost_ass_threshold
+        self.tentative_ass_threshold = cfg.association.tentative_ass_threshold
+        self.text_emb_threshold = cfg.embeddings.text_threshold
+        self.emb_threshold = cfg.embeddings.visual_threshold
+        self.max_dist_multiplier = cfg.association.max_dist_multiplier
         
-        self.max_tentative_age = Config.MAX_TENTATIVE_AGE
-        self.max_active_frames = Config.MAX_ACTIVE_FRAMES
+        self.max_tentative_age = cfg.track_lifecycle.max_tentative_age
+        self.max_active_frames = cfg.track_lifecycle.max_active_frames
         self.dynamic_classes_list = [str(cls).lower() for cls in dynamic_classes_list]
         
         self.device = device
         cotracker_checkpoint = os.environ.get(
             "COTRACKER_CHECKPOINT",
-            "co-tracker/checkpoints/scaled_online.pth",
+            cfg.cotracker.checkpoint_path,
         )
         self.point_tracker = CoTrackerOnlinePredictor(cotracker_checkpoint).to(device)
-        self.cotracker_window_len = Config.COTRACKER_WINDOW_LEN
+        self.cotracker_window_len = cfg.cotracker.window_len
         self.video = video
         _,  _, self.H, self.W, = video.size()
         
@@ -799,11 +806,11 @@ class Simple3DTracker:
     
     def _get_current_extrinsics(self, frame_id: int) -> Optional[np.ndarray]:
         """Get camera extrinsics for current frame."""
-        if self.extrinsics_list is None:
+        if self.extrinsics_list is None or self.intrinsics_list is None:
             return None, None
         if frame_id < 0 or frame_id >= len(self.extrinsics_list):
-            return None
-        return self.extrinsics_list[frame_id],self.intrinsics_list[frame_id]
+            return None, None
+        return self.extrinsics_list[frame_id], self.intrinsics_list[frame_id]
     
     def _compute_transform_for_moving_tracks(
         self,
@@ -869,7 +876,7 @@ class Simple3DTracker:
         visibilities_ = visibilities[0][-1].cpu().detach().numpy()
         _, visible = _get_good_points(
             points_, visibilities_, self.H, self.W,
-            thresh=Config.COTRACKER_VISIBILITY_THRESH
+            thresh=cfg.cotracker.visibility_thresh
         )
         
         keypoints_3d, valid_mask = _get_3d_for_keypoints(
@@ -891,15 +898,20 @@ class Simple3DTracker:
                 continue
             
             # Track IS in CoTracker output - use actual predictions
-            track_points = points_[track_mask.cpu().numpy()]
-            track_visibilities = visibilities_[track_mask.cpu().numpy()]
+            track_mask_np = track_mask.cpu().numpy()
+            track_points = points_[track_mask_np]
+            track_visibilities = visibilities_[track_mask_np]
             
             track.update_visibility_from_cotracker(
                 track_points, track_visibilities, frame_id, self.H, self.W
             )
             
             if track.is_dynamic and track.motion_state.status == "MOVING":
-                track.moving_keypoints[frame_id] = track_points[visible[track_mask.cpu().numpy()]]
+                track.moving_keypoints[frame_id] = track_points[visible[track_mask_np]]
+
+                valid_3d = keypoints_3d[track_mask_np][valid_mask[track_mask_np]]
+                if len(valid_3d) > 0:
+                    track.last_3d_keypoints = valid_3d.copy()
         
         # Compute transforms
         for track in self.tracks:
@@ -908,8 +920,9 @@ class Simple3DTracker:
                 continue
             
             track_mask = obj_tensor == track.id
-            new_keypoints_3d = keypoints_3d[track_mask]
-            new_valid_mask = valid_mask[track_mask]
+            track_mask_np = track_mask.cpu().numpy()
+            new_keypoints_3d = keypoints_3d[track_mask_np]
+            new_valid_mask = valid_mask[track_mask_np]
             
             if len(new_valid_mask) == 0:
                 track.transform = np.eye(4)
@@ -927,7 +940,7 @@ class Simple3DTracker:
             )
             good_point_mask = cur_valid_mask & new_valid_mask
             
-            if np.sum(good_point_mask) < Config.MIN_KEYPOINTS_FOR_TRANSFORM:
+            if np.sum(good_point_mask) < cfg.cotracker.min_keypoints_for_transform:
                 track.transform = np.eye(4)
                 continue
             
@@ -950,13 +963,26 @@ class Simple3DTracker:
             
             if len(corres) > 0:
                 rmse = p2p.compute_rmse(cur_pcd, new_pcd, corres)
-                if rmse > Config.MAX_RMSE:
+                if rmse > cfg.cotracker.max_rmse:
                     print(f'Track {track.id}: suspicious transform (RMSE={rmse:.3f})')
                     track.transform = np.eye(4)
+                    track.last_3d_keypoints = track.stable_3d_keypoints
+                    if current_extrinsics is not None:
+                        track.update_visibility_with_extrinsics_compensation(
+                            frame_id, self.H, self.W,
+                            current_intrinsics, current_extrinsics
+                        )
                 else:
                     track.transform = transformation
+                    track.stable_3d_keypoints = track.last_3d_keypoints
             else:
                 track.transform = np.eye(4)
+                track.last_3d_keypoints = track.stable_3d_keypoints
+                if current_extrinsics is not None:
+                    track.update_visibility_with_extrinsics_compensation(
+                        frame_id, self.H, self.W,
+                        current_intrinsics, current_extrinsics
+                    )
     
     def update(
         self,
@@ -981,7 +1007,7 @@ class Simple3DTracker:
         
         active_track_vis_embs = np.array([t.embedding for t in active_tracks])
         det_vis_embs = np.array([d["embedding"] for d in frame_detections])
-        vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, active_track_vis_embs, det_vis_embs)
+        vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, active_track_vis_embs, det_vis_embs)
         active_track_vis_embs = _ensure_embedding_2d(active_track_vis_embs, vis_dim)
         det_vis_embs = _ensure_embedding_2d(det_vis_embs, vis_dim)
         
@@ -1052,7 +1078,7 @@ class Simple3DTracker:
         if len(self.lost_tracks) > 0:
             lost_track_vis_embs = np.array([t.embedding for t in self.lost_tracks])
             lost_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, lost_track_vis_embs, lost_det_vis_embs)
+            vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, lost_track_vis_embs, lost_det_vis_embs)
             lost_track_vis_embs = _ensure_embedding_2d(lost_track_vis_embs, vis_dim)
             lost_det_vis_embs = _ensure_embedding_2d(lost_det_vis_embs, vis_dim)
             
@@ -1120,7 +1146,7 @@ class Simple3DTracker:
         if len(tentative_tracks) > 0 and len(unmatched_detections) > 0:
             tentative_track_vis_embs = np.array([t.embedding for t in tentative_tracks])
             tentative_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            vis_dim = _infer_embedding_dim(Config.VIS_EMBEDDING_DIM, tentative_track_vis_embs, tentative_det_vis_embs)
+            vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, tentative_track_vis_embs, tentative_det_vis_embs)
             tentative_track_vis_embs = _ensure_embedding_2d(tentative_track_vis_embs, vis_dim)
             tentative_det_vis_embs = _ensure_embedding_2d(tentative_det_vis_embs, vis_dim)
             

@@ -11,6 +11,7 @@ import torch
 from typing import List, Tuple, Optional
 from PIL import Image
 import torchvision.transforms as transforms
+from config_loader import cfg
 
 # ============================================================================
 # CLIP IMPORT (with fallback)
@@ -22,28 +23,6 @@ try:
 except ImportError:
     CLIP_AVAILABLE = False
     print("⚠️  CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git")
-
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-class Config:
-    """Configuration parameters for CLIP appearance extraction."""
-    
-    # === CLIP MODEL ===
-    CLIP_MODEL_NAME = "ViT-B/32"  # Options: "ViT-B/32", "ViT-B/16", "ViT-L/14", "RN50"
-    CLIP_INPUT_SIZE = 224  # Standard CLIP input resolution
-    CLIP_EMBEDDING_DIM = 512  # Output dimension for ViT-B/32
-    
-    # === CROP PREPROCESSING ===
-    CROP_MARGIN = 0.2  # 20% padding around object bounding box
-    MASK_DILATION_KERNEL = 5  # Pixels for mask dilation
-    BACKGROUND_BLUR = 15  # Gaussian blur kernel size for background
-    
-    # === BATCH PROCESSING ===
-    CLIP_BATCH_SIZE = 32  # Max objects per CLIP forward pass
-    CLIP_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 # ============================================================================
@@ -59,12 +38,12 @@ class CLIPAppearanceExtractor:
     
     def __init__(
         self,
-        model_name: str = Config.CLIP_MODEL_NAME,
-        device: str = Config.CLIP_DEVICE,
-        input_size: int = Config.CLIP_INPUT_SIZE,
-        crop_margin: float = Config.CROP_MARGIN,
-        mask_dilation: int = Config.MASK_DILATION_KERNEL,
-        background_blur: int = Config.BACKGROUND_BLUR
+        model_name: str = None,
+        device: str = None,
+        input_size: int = None,
+        crop_margin: float = None,
+        mask_dilation: int = None,
+        background_blur: int = None
     ):
         """
         Initialize CLIP model.
@@ -82,12 +61,18 @@ class CLIPAppearanceExtractor:
                 "CLIP is not installed. Install with:\n"
                 "pip install git+https://github.com/openai/CLIP.git"
             )
-        
+
+        model_name = cfg.clip.model_name if model_name is None else model_name
+        if device is None:
+            device = cfg.clip.device
+            if device == "cuda" and not torch.cuda.is_available():
+                device = "cpu"
+         
         self.device = device
-        self.input_size = input_size
-        self.crop_margin = crop_margin
-        self.mask_dilation = mask_dilation
-        self.background_blur = background_blur
+        self.input_size = cfg.clip.input_size if input_size is None else input_size
+        self.crop_margin = cfg.clip.crop_margin if crop_margin is None else crop_margin
+        self.mask_dilation = cfg.clip.mask_dilation_kernel if mask_dilation is None else mask_dilation
+        self.background_blur = cfg.clip.background_blur if background_blur is None else background_blur
         
         # Load CLIP model
         self.model, _ = clip.load(model_name, device=device)
@@ -95,8 +80,8 @@ class CLIPAppearanceExtractor:
         
         # CLIP preprocessing transform (matches training)
         self.clip_transform = transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.CenterCrop(input_size),
+            transforms.Resize(self.input_size),
+            transforms.CenterCrop(self.input_size),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.48145466, 0.4578275, 0.40821073],
@@ -228,7 +213,7 @@ class CLIPAppearanceExtractor:
         self,
         image: np.ndarray,
         masks: List[np.ndarray],
-        batch_size: int = Config.CLIP_BATCH_SIZE
+        batch_size: int = None
     ) -> np.ndarray:
         """
         Extract CLIP embeddings for N objects from single frame.
@@ -241,10 +226,11 @@ class CLIPAppearanceExtractor:
         Returns:
             embeddings: Array [N, D] of CLIP embeddings (L2-normalized).
         """
+        batch_size = cfg.clip.batch_size if batch_size is None else batch_size
         N = len(masks)
         
         if N == 0:
-            return np.zeros((0, Config.CLIP_EMBEDDING_DIM))
+            return np.zeros((0, cfg.clip.embedding_dim))
         
         # === STEP 1: Prepare all crops ===
         pil_crops = []
@@ -329,7 +315,9 @@ def get_clip_extractor(device: Optional[str] = None) -> CLIPAppearanceExtractor:
     global _clip_extractor
     
     if _clip_extractor is None:
-        target_device = device if device is not None else Config.CLIP_DEVICE
+        target_device = device if device is not None else cfg.clip.device
+        if target_device == "cuda" and not torch.cuda.is_available():
+            target_device = "cpu"
         _clip_extractor = CLIPAppearanceExtractor(device=target_device)
     
     return _clip_extractor

@@ -8,48 +8,8 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 from typing import Tuple, Optional, List
+from config_loader import cfg
 
-
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-class Config:
-    """Similarity computation configuration."""
-    # Gaussian IoA
-    VOXEL_SIZE = 0.05  # Increased from 0.01 for speed
-    SIGMA_MULTIPLIER = 0.1  # 10% of object size
-    SIGMA_MIN = 0.05
-    SIGMA_MAX = 0.5
-    MAX_POINTS = 500
-    LOW_IOU_THRESH = 0.01
-    HIGH_IOU_THRESH = 0.95
-    
-    # Embedding similarity
-    TEXT_THRESHOLD = 0.75
-    
-    # Voxel similarity
-    W_IOU = 0.6
-    W_DIST = 0.2
-    DIST_MAX = 3.0
-    MIN_OBJECT_SIZE=0.05
-    
-    # === SIMILARITY WEIGHTS ===
-    # Static objects
-    STATIC_EMB_WEIGHT = 0.4
-    STATIC_IOA_WEIGHT = 0.4
-    STATIC_DIST_WEIGHT = 0.2
-    
-    # Dynamic objects
-    DYNAMIC_EMB_WEIGHT = 0.4
-    DYNAMIC_IOA_WEIGHT = 0.1
-    DYNAMIC_DIST_WEIGHT = 0.3
-    DYNAMIC_KEYPOINT_WEIGHT = 0.2 
-    
-    # === KEYPOINT OVERLAP ===
-    USE_KEYPOINT_OVERLAP = True
-    KEYPOINT_OVERLAP_MIN = 0.3      # Min fraction of keypoints in mask
-    KEYPOINT_OVERLAP_BONUS = 0.3    # Max similarity boost
 
 # ============================================================================
 # GAUSSIAN IOA
@@ -58,12 +18,12 @@ class Config:
 def compute_bidirectional_gaussian_ioa_fast(
     points_t: np.ndarray,
     points_d: np.ndarray,
-    voxel_size: float = Config.VOXEL_SIZE,
+    voxel_size: float = cfg.voxel_map.voxel_size,
     sigma: Optional[float] = None,
     use_approximation: bool = True,
-    low_iou_thresh: float = Config.LOW_IOU_THRESH,
-    high_iou_thresh: float = Config.HIGH_IOU_THRESH,
-    max_points: int = Config.MAX_POINTS,
+    low_iou_thresh: float = 0.01,
+    high_iou_thresh: float = 0.95,
+    max_points: int = 500,
 ) -> Tuple[float, float, float]:
     """
     Optimized Gaussian IoA with 10-20x speedup.
@@ -221,7 +181,7 @@ def calc_emb_similarity_visual_only_optimized(
     dets_vis_emb: np.ndarray,
     tracks_text_emb: Optional[np.ndarray] = None,
     dets_text_emb: Optional[np.ndarray] = None,
-    text_threshold: float = Config.TEXT_THRESHOLD,
+    text_threshold: float = cfg.embeddings.text_threshold,
     use_text_filter: bool = True
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -291,7 +251,7 @@ def compute_center_distance_matrix_vectorized(
     det_centers: np.ndarray,
     track_sizes: np.ndarray,
     det_sizes: Optional[np.ndarray] = None,
-    threshold_multiplier: float = 1.5
+    threshold_multiplier: float = cfg.association.max_dist_multiplier
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Fully vectorized center distance computation and filtering.
@@ -421,6 +381,7 @@ def calc_voxel_similarity(
     w_iou: float = None,      # Will be set based on static/dynamic
     w_dist: float = None,     # Will be set based on static/dynamic
     w_keypoints: float = None, # Will be set based on static/dynamic
+    w_emb: float = None,
     image_shape: Optional[Tuple[int, int]] = None,
     debug: bool = True
 ) -> float:
@@ -443,16 +404,24 @@ def calc_voxel_similarity(
         similarity: Combined similarity score [0, 1].
     """
     is_static = track.motion_state.status == 'STATIC'
-    # Auto-configure weights based on track type
-    if w_iou is None or w_dist is None or w_keypoints is None:
-        if not is_static:
-            w_iou = Config.DYNAMIC_IOA_WEIGHT if w_iou is None else w_iou
-            w_keypoints = Config.DYNAMIC_KEYPOINT_WEIGHT if w_keypoints is None else w_keypoints
-            w_dist = Config.DYNAMIC_DIST_WEIGHT 
-        else:
-            w_iou = Config.STATIC_IOA_WEIGHT if w_iou is None else w_iou
-            w_dist = Config.STATIC_DIST_WEIGHT if w_dist is None else w_dist
-            w_keypoints = 0.0  # No keypoint overlap for static
+
+    if is_static:
+        w_iou = cfg.similarity_weights.static.ioa if w_iou is None else w_iou
+        w_dist = cfg.similarity_weights.static.dist if w_dist is None else w_dist
+        w_keypoints = 0.0
+        w_emb = cfg.similarity_weights.static.emb if w_emb is None else w_emb
+    else:
+        w_iou = cfg.similarity_weights.dynamic.ioa if w_iou is None else w_iou
+        w_keypoints = cfg.similarity_weights.dynamic.keypoint if w_keypoints is None else w_keypoints
+        w_dist = cfg.similarity_weights.dynamic.dist if w_dist is None else w_dist
+        w_emb = cfg.similarity_weights.dynamic.emb if w_emb is None else w_emb
+
+    total_w = w_iou + w_dist + w_keypoints + w_emb
+    if total_w > 0:
+        w_iou /= total_w
+        w_dist /= total_w
+        w_keypoints /= total_w
+        w_emb /= total_w
     
     # Convert to point clouds
     pcd_det = o3d.geometry.PointCloud(
@@ -467,12 +436,10 @@ def calc_voxel_similarity(
     det_center = np.array(pcd_det.get_center())
     track_center = np.array(pcd_track.get_center())
     dist = np.linalg.norm(det_center - track_center)
-    dist_max = 3.0  # meters
-    
     # Size-normalized distance
     det_size = compute_object_size(np.array(pcd_det.points))
     track_size = track.object_size
-    ref_size = max(det_size, track_size, Config.MIN_OBJECT_SIZE)
+    ref_size = max(det_size, track_size, cfg.object_size.min_object_size)
     normalized_dist = dist / ref_size
     
     dist_similarity = np.exp(-(normalized_dist**2) / (2 * 1.0**2))
@@ -506,8 +473,6 @@ def calc_voxel_similarity(
     )[0, 0]
     
     # === 5. Combine Components ===
-    w_emb = 1.0 - w_iou - w_dist - w_keypoints
-    
     similarity = (
         w_iou * ioa +
         w_emb * emb_sim +
@@ -516,12 +481,11 @@ def calc_voxel_similarity(
     )
     
     if debug:
-        track_type = "DYNAMIC" if not is_static else "STATIC"
+        track_type = "STATIC" if is_static else "DYNAMIC"
         print(f"Track {track.id} ({track_type}): "
-              f"IoA={ioa:.3f}, Emb={emb_sim:.3f}, "
-              f"Dist={dist_similarity:.3f} (w={w_dist:.2f}), "
-              f"Kpts={keypoint_overlap:.3f} (w={w_keypoints:.2f}), "
-              f"Total={similarity:.3f}")
+              f"IoA={ioa:.3f}(w={w_iou:.2f}), Emb={emb_sim:.3f}(w={w_emb:.2f}), "
+              f"Dist={dist_similarity:.3f}(w={w_dist:.2f}), "
+              f"Kpts={keypoint_overlap:.3f}(w={w_keypoints:.2f}) -> {similarity:.3f}")
     
     return float(similarity)
 # ============================================================================
@@ -603,6 +567,6 @@ def _adaptive_sigma_fast(
     size_b = np.linalg.norm(np.max(points_b, axis=0) - np.min(points_b, axis=0))
     avg_size = (size_a + size_b) / 2.0
     
-    sigma = avg_size * Config.SIGMA_MULTIPLIER
-    
-    return float(np.clip(sigma, Config.SIGMA_MIN, Config.SIGMA_MAX))
+    sigma = avg_size * 0.1
+
+    return float(np.clip(sigma, 0.05, 0.5))

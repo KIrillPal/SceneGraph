@@ -11,30 +11,7 @@ from sentence_transformers import SentenceTransformer
 from typing import Dict, List, Optional
 from mask_utils import safe_erode
 from point_utils import statistical_outlier_removal
-
-
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-class Config:
-    """Feature extraction configuration."""
-    # Text embeddings
-    TEXT_MODEL_NAME = "all-MiniLM-L6-v2"
-    EMBEDDING_DIM = 384
-    
-    # Object embeddings
-    MASK_RESIZE = (72, 72)
-    EPSILON = 1e-8
-    
-    # Point cloud generation
-    PC_TARGET_H = 378
-    PC_TARGET_W = 504
-    
-    # Keypoints
-    MAX_KEYPOINTS = 100
-    KEYPOINT_QUALITY = 0.01
-    KEYPOINT_MIN_DIST = 2
+from config_loader import cfg
 
 
 # ============================================================================
@@ -44,7 +21,8 @@ class Config:
 class TextEmbeddingCache:
     """Cache for text embeddings to avoid recomputation."""
     
-    def __init__(self, model_name: str = Config.TEXT_MODEL_NAME):
+    def __init__(self, model_name: str = None):
+        model_name = cfg.feature_extraction.text_model_name if model_name is None else model_name
         self.model = SentenceTransformer(model_name)
         self.cache: Dict[str, np.ndarray] = {}
     
@@ -148,8 +126,8 @@ def get_text_embeddings(
 def get_object_embedding(
     features: np.ndarray,
     mask: np.ndarray,
-    resize: tuple = Config.MASK_RESIZE,
-    epsilon: float = Config.EPSILON
+    resize: tuple = None,
+    epsilon: float = None
 ) -> np.ndarray:
     """
     Extract object-specific embedding from image features using mask.
@@ -170,6 +148,9 @@ def get_object_embedding(
         - Mask is resized for consistent feature aggregation
         - L2 normalization ensures unit norm embedding
     """
+    resize = tuple(cfg.feature_extraction.mask_resize) if resize is None else resize
+    epsilon = cfg.feature_extraction.epsilon if epsilon is None else epsilon
+
     # Resize mask to fixed resolution
     mask_uint8 = mask.astype(np.uint8)
     resized = cv2.resize(mask_uint8, resize).reshape(-1, 1)
@@ -191,8 +172,8 @@ def get_obj_point_cloud(
     points: np.ndarray,
     clean_mask: np.ndarray,
     mask: np.ndarray,
-    h: int = Config.PC_TARGET_H,
-    w: int = Config.PC_TARGET_W,
+    h: int = None,
+    w: int = None,
 ) -> o3d.geometry.PointCloud:
     """
     Generate colored 3D point cloud from image, depth points, and masks.
@@ -217,6 +198,9 @@ def get_obj_point_cloud(
         - Safe erosion applied to remove boundary artifacts
         - Statistical outlier removal filters noisy 3D points
     """
+    h = cfg.feature_extraction.pc_target_h if h is None else h
+    w = cfg.feature_extraction.pc_target_w if w is None else w
+
     # Resize image and mask to target resolution
     image_r = cv2.resize(image, (w, h)).reshape((-1, 3))
     H, W = mask.shape
@@ -258,9 +242,9 @@ def get_obj_point_cloud(
 def get_keypoints(
     image: np.ndarray,
     mask: np.ndarray,
-    max_keypoints: int = Config.MAX_KEYPOINTS,
-    quality: float = Config.KEYPOINT_QUALITY,
-    min_distance: int = Config.KEYPOINT_MIN_DIST
+    max_keypoints: int = None,
+    quality: float = None,
+    min_distance: int = None
 ) -> np.ndarray:
     """
     Detect Shi-Tomasi corners within object mask.
@@ -280,6 +264,10 @@ def get_keypoints(
         - Mask restricts detection to object region
         - Returns empty array (not None) if no corners found
     """
+    max_keypoints = cfg.feature_extraction.max_keypoints if max_keypoints is None else max_keypoints
+    quality = cfg.feature_extraction.keypoint_quality if quality is None else quality
+    min_distance = cfg.feature_extraction.keypoint_min_dist if min_distance is None else min_distance
+
     # Apply mask to image
     masked_img = image.copy()
     masked_img[:, :, 0] *= mask

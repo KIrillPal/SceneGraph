@@ -7,6 +7,7 @@ import torch
 from typing import List, Tuple, Optional
 from PIL import Image
 import torchvision.transforms as transforms
+from config_loader import cfg
 
 # ============================================================================
 # DINO IMPORT (with fallback)
@@ -26,36 +27,6 @@ except ImportError:
 
 
 # ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-class Config:
-    """Configuration parameters for DINO appearance extraction."""
-     
-    # === DINO MODEL ===
-    DINOV2_MODEL_NAME = os.environ.get("DINOV2_MODEL_NAME", "vit_small_patch14_dinov2")
-    DINOV3_MODEL_NAME = os.environ.get(
-        "DINOV3_MODEL_NAME",
-        "facebook/dinov3-vits16-pretrain-lvd1689m",
-    )
-    DINO_INPUT_SIZE = int(os.environ.get("DINO_INPUT_SIZE", "518"))
-    DINO_EMBEDDING_DIM = 384  # Default for small ViT models; inferred after loading.
-    
-    # === CROP PREPROCESSING ===
-    CROP_MARGIN = 0.2  # 20% padding around object bounding box
-    MASK_DILATION_KERNEL = 5  # Pixels for mask dilation
-    BACKGROUND_BLUR = 15  # Gaussian blur kernel size for background
-    
-    # === BATCH PROCESSING ===
-    DINO_BATCH_SIZE = 32  # Max objects per DINO forward pass
-    DINO_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    
-    # === EMBEDDING SMOOTHING ===
-    DINO_EMA_ALPHA = 0.15  # Slow update for appearance stability
-
-
-# ============================================================================
 # DINO APPEARANCE EXTRACTOR
 # ============================================================================
 
@@ -71,11 +42,11 @@ class DINOAppearanceExtractor:
         self,
         version: str = "dinov3",
         model_name: Optional[str] = None,
-        device: str = Config.DINO_DEVICE,
-        input_size: int = Config.DINO_INPUT_SIZE,
-        crop_margin: float = Config.CROP_MARGIN,
-        mask_dilation: int = Config.MASK_DILATION_KERNEL,
-        background_blur: int = Config.BACKGROUND_BLUR
+        device: Optional[str] = None,
+        input_size: Optional[int] = None,
+        crop_margin: Optional[float] = None,
+        mask_dilation: Optional[int] = None,
+        background_blur: Optional[int] = None
     ):
         """
         Initialize DINO model.
@@ -91,20 +62,28 @@ class DINOAppearanceExtractor:
         """
         if version not in {"dinov2", "dinov3"}:
             raise ValueError(f"Unsupported DINO version: {version}")
-         
+
+        if device is None:
+            device = cfg.dino.device
+            if device == "cuda" and not torch.cuda.is_available():
+                device = "cpu"
+          
         self.version = version
         self.device = device
-        self.input_size = input_size
-        self.crop_margin = crop_margin
-        self.mask_dilation = mask_dilation
-        self.background_blur = background_blur
-        self.embedding_dim = Config.DINO_EMBEDDING_DIM
+        self.input_size = cfg.dino.input_size if input_size is None else input_size
+        self.crop_margin = cfg.dino.crop_margin if crop_margin is None else crop_margin
+        self.mask_dilation = cfg.dino.mask_dilation_kernel if mask_dilation is None else mask_dilation
+        self.background_blur = cfg.dino.background_blur if background_blur is None else background_blur
+        self.embedding_dim = cfg.dino.embedding_dim
          
         if version == "dinov2":
             if not TIMM_AVAILABLE:
                 raise ImportError("timm is required for DINOv2. Install with: pip install timm")
             self.backend = "timm"
-            self.model_name = model_name or Config.DINOV2_MODEL_NAME
+            self.model_name = model_name or os.environ.get(
+                "DINOV2_MODEL_NAME",
+                getattr(cfg.dino, "dinov2_model_name", "vit_small_patch14_dinov2"),
+            )
             self.model = timm.create_model(self.model_name, pretrained=True, num_classes=0)
             self.embedding_dim = getattr(self.model, "num_features", self.embedding_dim)
             self.model.eval().to(device)
@@ -114,7 +93,10 @@ class DINOAppearanceExtractor:
                     "transformers is required for DINOv3. Install with: pip install transformers"
                 )
             self.backend = "transformers"
-            self.model_name = model_name or Config.DINOV3_MODEL_NAME
+            self.model_name = model_name or os.environ.get(
+                "DINOV3_MODEL_NAME",
+                getattr(cfg.dino, "dinov3_model_name", cfg.dino.model_name),
+            )
             self.processor = AutoImageProcessor.from_pretrained(self.model_name)
             self.model = AutoModel.from_pretrained(self.model_name)
             self.embedding_dim = getattr(self.model.config, "hidden_size", self.embedding_dim)
@@ -123,8 +105,8 @@ class DINOAppearanceExtractor:
         if self.backend == "timm":
             # DINO preprocessing transform (ImageNet normalization)
             self.dino_transform = transforms.Compose([
-                transforms.Resize(input_size),
-                transforms.CenterCrop(input_size),
+                transforms.Resize(self.input_size),
+                transforms.CenterCrop(self.input_size),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -267,7 +249,7 @@ class DINOAppearanceExtractor:
         self,
         image: np.ndarray,
         masks: List[np.ndarray],
-        batch_size: int = Config.DINO_BATCH_SIZE
+        batch_size: int = None
     ) -> np.ndarray:
         """
         Extract DINO embeddings for N objects from single frame.
@@ -280,6 +262,7 @@ class DINOAppearanceExtractor:
         Returns:
             embeddings: Array [N, D] of DINO embeddings (L2-normalized).
         """
+        batch_size = cfg.dino.batch_size if batch_size is None else batch_size
         N = len(masks)
          
         if N == 0:
@@ -374,7 +357,9 @@ def get_dino_extractor(
     """Get or create global DINO extractor instance."""
     global _dino_extractor, _dino_extractor_key
     
-    target_device = device if device is not None else Config.DINO_DEVICE
+    target_device = device if device is not None else cfg.dino.device
+    if target_device == "cuda" and not torch.cuda.is_available():
+        target_device = "cpu"
     key = (version, model_name or "", target_device)
     if _dino_extractor is None or _dino_extractor_key != key:
         _dino_extractor = DINOAppearanceExtractor(

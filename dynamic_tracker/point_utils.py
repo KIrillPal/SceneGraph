@@ -10,20 +10,7 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 from typing import Tuple, List, Optional, Union
-
-
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-class Config:
-    """Point cloud processing configuration."""
-    # Outlier removal
-    SOR_K = 10  # Number of neighbors
-    SOR_STD_RATIO = 1.5  # Standard deviation threshold
-    
-    # DA3 loading
-    CONF_THRESH_MUL = 0.5  # Confidence threshold multiplier
+from config_loader import cfg
 
 
 # ============================================================================
@@ -32,8 +19,8 @@ class Config:
 
 def statistical_outlier_removal(
     points: np.ndarray,
-    k: int = Config.SOR_K,
-    std_ratio: float = Config.SOR_STD_RATIO
+    k: int = None,
+    std_ratio: float = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Remove outliers using statistical analysis of nearest neighbor distances.
@@ -50,6 +37,9 @@ def statistical_outlier_removal(
         cleaned_points: Filtered point cloud [M, 3], M <= N.
         mask: Boolean array [N] indicating kept points.
     """
+    k = cfg.point_cloud.sor_k if k is None else k
+    std_ratio = cfg.point_cloud.sor_std_ratio if std_ratio is None else std_ratio
+
     # Not enough points for k neighbors
     if len(points) < k + 1:
         return points, np.ones(len(points), dtype=bool)
@@ -169,7 +159,7 @@ def get_da3_pointclouds(
     depth_dir: str,
     extrinsics_file: str,
     N: int,
-    conf_thresh_mul: float = Config.CONF_THRESH_MUL
+    conf_thresh_mul: float = None
 ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], int, int]:
     """
     Load DA3 depth frames and convert to filtered point clouds.
@@ -192,6 +182,12 @@ def get_da3_pointclouds(
         - Confidence threshold = conf_thresh_mul * mean(conf)
         - Statistical outlier removal applied after projection
     """
+    conf_thresh_mul = (
+        cfg.point_cloud.da3_conf_thresh_mul
+        if conf_thresh_mul is None
+        else conf_thresh_mul
+    )
+
     # Load extrinsics (poses)
     extrinsics = []
     with open(extrinsics_file, "r") as f:
