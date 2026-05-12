@@ -12,6 +12,9 @@ Each frame NPZ contains:
   - image
   - masks
   - embeddings
+  - keypoints (optional)
+  - moving_keypoints (optional)
+  - keypoint_vis (optional)
   - object_states (optional)
   - point_cloud
   - intrinsic
@@ -55,6 +58,7 @@ ENTITY_TRACK_VOXELS = "world/track_voxels_merged"
 ENTITY_TRACK_LABELS = "world/track_labels"
 ENTITY_IMAGE_ROOT = "image"
 ENTITY_MASKED_IMAGE = "image/masked"
+ENTITY_KEYPOINT_IMAGE = "image/keypoints"
 DEFAULT_CONFIG = {
     "fps": 5.0,
     "scene_sub": 2,
@@ -64,7 +68,10 @@ DEFAULT_CONFIG = {
     "track_voxel_size": 0.02,
     "track_voxels_sub": 1,
     "track_voxels_radius": 0.004,
-    "track_accum_voxel_size": 0.02,
+    "track_accum_voxel_size": 0.05,
+    "track_accum_log_stride": 5,
+    "track_accum_max_points": 200000,
+    "keypoint_history": 10,
     "mask_alpha": 0.3,
     "enable_sor": False,
 }
@@ -76,9 +83,10 @@ DESCRIPTION = """
 | `world/camera` | Camera pose + pinhole |
 | `world/scene_frame` | Scene point cloud for the current frame |
 | `world/track_points` | Track point clouds reconstructed from masks |
-| `world/track_voxels_merged` | Accumulated track geometry rebuilt over time |
+| `world/track_voxels_merged` | Accumulated track geometry, voxelized and logged sparsely |
 | `world/track_labels` | Track ids at 3D centroids |
 | `image/masked` | Image with track masks overlaid |
+| `image/keypoints` | Image with per-track keypoints overlaid |
 """.strip()
 
 _INDEX_RE = re.compile(r"(\d+)(?!.*\d)")
@@ -215,7 +223,10 @@ def _build_blueprint():
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(name="3D", origin="world"),
-            rrb.Spatial2DView(name="Masked Image", origin=ENTITY_IMAGE_ROOT),
+            rrb.Vertical(
+                rrb.Spatial2DView(name="Masked Image", origin=ENTITY_MASKED_IMAGE),
+                rrb.Spatial2DView(name="Keypoints", origin=ENTITY_KEYPOINT_IMAGE),
+            ),
             rrb.TextDocumentView(name="Info", origin="description"),
         )
     )
@@ -282,6 +293,37 @@ def _load_object_states(raw_obj: np.ndarray | dict | None) -> dict[str, str]:
     }
 
 
+def _load_keypoint_vis(raw_obj: np.ndarray | dict | None) -> dict[int, dict[str, object]]:
+    if raw_obj is None:
+        return {}
+    if isinstance(raw_obj, np.ndarray) and raw_obj.dtype == object:
+        raw_obj = raw_obj.item()
+    if raw_obj is None:
+        return {}
+
+    out: dict[int, dict[str, object]] = {}
+    for track_id, raw_info in dict(raw_obj).items():
+        info = dict(raw_info)
+        keypoints = info.get("keypoints")
+        moving_keypoints = info.get("moving_keypoints")
+        out[int(track_id)] = {
+            "class_name": str(info.get("class_name", "")),
+            "is_dynamic": bool(info.get("is_dynamic", False)),
+            "motion_state": str(info.get("motion_state", "UNKNOWN")),
+            "keypoints": (
+                np.asarray(keypoints, dtype=np.float32).reshape(-1, 2)
+                if keypoints is not None
+                else None
+            ),
+            "moving_keypoints": (
+                np.asarray(moving_keypoints, dtype=np.float32).reshape(-1, 2)
+                if moving_keypoints is not None
+                else None
+            ),
+        }
+    return out
+
+
 def _load_frame_payload(frame_path: Path) -> dict[str, object]:
     with np.load(frame_path, allow_pickle=True) as data:
         frame_id = (
@@ -293,6 +335,17 @@ def _load_frame_payload(frame_path: Path) -> dict[str, object]:
             "frame_id": frame_id,
             "image": np.asarray(data["image"]),
             "masks": _load_object_dict(data["masks"], np.bool_),
+            "keypoints": _load_object_dict(
+                data["keypoints"] if "keypoints" in data.files else None,
+                np.float32,
+            ),
+            "moving_keypoints": _load_object_dict(
+                data["moving_keypoints"] if "moving_keypoints" in data.files else None,
+                np.float32,
+            ),
+            "keypoint_vis": _load_keypoint_vis(
+                data["keypoint_vis"] if "keypoint_vis" in data.files else None
+            ),
             "object_states": _load_object_states(
                 data["object_states"] if "object_states" in data.files else None
             ),
@@ -325,6 +378,11 @@ def _collect_track_ids(frame_paths: list[Path]) -> list[int]:
         masks = _load_frame_masks(frame_path)
         for track_map in masks.values():
             track_ids.update(int(track_id) for track_id in track_map)
+        with np.load(frame_path, allow_pickle=True) as data:
+            keypoint_vis = _load_keypoint_vis(
+                data["keypoint_vis"] if "keypoint_vis" in data.files else None
+            )
+            track_ids.update(keypoint_vis)
     return sorted(track_ids)
 
 
@@ -365,6 +423,286 @@ def _render_masked_image(
             resized_mask = _resize_mask(mask, (h, w))
             overlay[resized_mask] = _rgb_to_bgr(track_colors[int(track_id)])
     return cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0.0)
+
+
+def _detect_keypoints_from_mask(
+    image: np.ndarray,
+    mask: np.ndarray,
+    max_keypoints: int = 50,
+) -> np.ndarray:
+    resized_mask = _resize_mask(mask, image.shape[:2]).astype(np.uint8)
+    if cv2.countNonZero(resized_mask) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    keypoints = cv2.goodFeaturesToTrack(
+        gray,
+        maxCorners=max_keypoints,
+        qualityLevel=0.01,
+        minDistance=5,
+        mask=resized_mask,
+    )
+    if keypoints is None:
+        return np.zeros((0, 2), dtype=np.float32)
+    return keypoints.reshape(-1, 2).astype(np.float32)
+
+
+def _render_keypoint_image(
+    image: np.ndarray,
+    masks: dict[str, dict[int, np.ndarray]],
+    keypoints: dict[str, dict[int, np.ndarray]],
+    moving_keypoints: dict[str, dict[int, np.ndarray]],
+    track_colors: dict[int, np.ndarray],
+) -> np.ndarray:
+    vis = image.copy()
+    h, w = image.shape[:2]
+
+    for class_name, track_map in masks.items():
+        class_keypoints = keypoints.get(class_name, {})
+        class_moving_keypoints = moving_keypoints.get(class_name, {})
+        for track_id, mask in track_map.items():
+            track_id = int(track_id)
+            color = tuple(int(c) for c in _rgb_to_bgr(track_colors[track_id]))
+
+            resized_mask = _resize_mask(mask, (h, w)).astype(np.uint8)
+            contours, _ = cv2.findContours(
+                resized_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(vis, contours, -1, color, 1)
+
+            kps = class_keypoints.get(track_id)
+            if kps is None or len(kps) == 0:
+                kps = _detect_keypoints_from_mask(image, mask)
+            kps = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+            for x, y in kps:
+                xi, yi = int(round(x)), int(round(y))
+                if 0 <= xi < w and 0 <= yi < h:
+                    cv2.circle(vis, (xi, yi), 2, color, -1, lineType=cv2.LINE_AA)
+
+            moving_kps = class_moving_keypoints.get(track_id)
+            if moving_kps is not None and len(moving_kps) > 0:
+                moving_kps = np.asarray(moving_kps, dtype=np.float32).reshape(-1, 2)
+                for x, y in moving_kps:
+                    xi, yi = int(round(x)), int(round(y))
+                    if 0 <= xi < w and 0 <= yi < h:
+                        cv2.drawMarker(
+                            vis,
+                            (xi, yi),
+                            color,
+                            markerType=cv2.MARKER_CROSS,
+                            markerSize=6,
+                            thickness=1,
+                            line_type=cv2.LINE_AA,
+                        )
+
+            coords = np.column_stack(np.where(resized_mask > 0))
+            if len(coords) > 0:
+                y_min, x_min = np.min(coords, axis=0)
+                cv2.putText(
+                    vis,
+                    str(track_id),
+                    (int(x_min), max(0, int(y_min) - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+    return vis
+
+
+def _update_keypoint_history(
+    history: dict[int, list[tuple[int, np.ndarray]]],
+    frame_id: int,
+    keypoint_vis: dict[int, dict[str, object]],
+    max_history: int,
+) -> None:
+    min_frame = frame_id - max_history
+    for track_id, info in keypoint_vis.items():
+        moving_keypoints = info.get("moving_keypoints")
+        if moving_keypoints is None or len(moving_keypoints) == 0:
+            continue
+        track_history = history.setdefault(int(track_id), [])
+        track_history.append(
+            (frame_id, np.asarray(moving_keypoints, dtype=np.float32).reshape(-1, 2))
+        )
+
+    for track_id in list(history):
+        history[track_id] = [item for item in history[track_id] if item[0] >= min_frame]
+        if not history[track_id]:
+            history.pop(track_id, None)
+
+
+def _render_keypoint_vis_image(
+    image: np.ndarray,
+    current_frame: int,
+    keypoint_vis: dict[int, dict[str, object]],
+    history: dict[int, list[tuple[int, np.ndarray]]],
+    track_colors: dict[int, np.ndarray],
+    show_history: int,
+) -> np.ndarray:
+    vis = image.copy()
+    h, w = image.shape[:2]
+    total_shi_tomasi = 0
+    total_cotracker = 0
+
+    for track_id in sorted(keypoint_vis):
+        info = keypoint_vis[track_id]
+        # Match visualize_all_tracks_keypoints: only moving dynamic tracks are shown.
+        if not bool(info.get("is_dynamic", False)):
+            continue
+        if str(info.get("motion_state", "")).upper() != "MOVING":
+            continue
+
+        color_bgr = tuple(int(c) for c in _rgb_to_bgr(track_colors[int(track_id)]))
+
+        # Match notebook trail logic: concatenate the first few CoTracker points
+        # from the current frame history window into one polyline.
+        trail_points: list[tuple[int, int]] = []
+        if show_history >= 0:
+            track_history = dict(history.get(int(track_id), []))
+            for frame_idx in range(max(0, current_frame - show_history), current_frame + 1):
+                moving_keypoints = track_history.get(frame_idx)
+                if moving_keypoints is None or len(moving_keypoints) == 0:
+                    continue
+                moving_keypoints = np.asarray(moving_keypoints, dtype=np.float32).reshape(-1, 2)
+                for x, y in moving_keypoints[:5]:
+                    xi, yi = int(round(float(x))), int(round(float(y)))
+                    if 0 <= xi < w and 0 <= yi < h:
+                        trail_points.append((xi, yi))
+        for idx in range(len(trail_points) - 1):
+            alpha = (idx + 1) / max(1, len(trail_points))
+            trail_color = tuple(int(c * alpha) for c in color_bgr)
+            cv2.line(
+                vis,
+                trail_points[idx],
+                trail_points[idx + 1],
+                trail_color,
+                thickness=3,
+                lineType=cv2.LINE_AA,
+            )
+
+        keypoints = info.get("keypoints")
+        if keypoints is not None and len(keypoints) > 0:
+            keypoints = np.asarray(keypoints, dtype=np.float32).reshape(-1, 2)
+            total_shi_tomasi += len(keypoints)
+            for x, y in keypoints:
+                xi, yi = int(round(float(x))), int(round(float(y)))
+                if 0 <= xi < w and 0 <= yi < h:
+                    cv2.circle(vis, (xi, yi), 4, (255, 255, 255), -1)
+                    cv2.circle(vis, (xi, yi), 3, color_bgr, -1)
+
+        moving_keypoints = info.get("moving_keypoints")
+        if moving_keypoints is not None and len(moving_keypoints) > 0:
+            moving_keypoints = np.asarray(moving_keypoints, dtype=np.float32).reshape(-1, 2)
+            total_cotracker += len(moving_keypoints)
+            for x, y in moving_keypoints:
+                xi, yi = int(round(float(x))), int(round(float(y)))
+                if 0 <= xi < w and 0 <= yi < h:
+                    diamond_size = 4
+                    pts = np.array(
+                        [
+                            [xi, yi - diamond_size],
+                            [xi + diamond_size, yi],
+                            [xi, yi + diamond_size],
+                            [xi - diamond_size, yi],
+                        ],
+                        np.int32,
+                    )
+                    cv2.fillPoly(vis, [pts], color_bgr)
+                    cv2.polylines(vis, [pts], True, (255, 255, 255), 1)
+
+        label_points = []
+        if keypoints is not None and len(keypoints) > 0:
+            label_points.append(keypoints)
+        if moving_keypoints is not None and len(moving_keypoints) > 0:
+            label_points.append(moving_keypoints)
+        if label_points:
+            center = np.mean(np.vstack(label_points), axis=0)
+            xi, yi = int(round(float(center[0]))), int(round(float(center[1])))
+            label = f"#{track_id}"
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            text_w, text_h = text_size
+            cv2.rectangle(
+                vis,
+                (xi - 5, yi - text_h - 8),
+                (xi + text_w + 5, yi + 3),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.putText(
+                vis,
+                label,
+                (xi, yi - 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color_bgr,
+                1,
+            )
+
+    legend_h = 120
+    cv2.rectangle(vis, (10, 10), (250, 10 + legend_h), (0, 0, 0), -1)
+    cv2.putText(
+        vis,
+        "Keypoint Visualization",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 255),
+        1,
+    )
+    cv2.line(vis, (20, 45), (240, 45), (255, 255, 255), 1)
+    cv2.circle(vis, (30, 65), 3, (200, 200, 200), -1)
+    cv2.putText(
+        vis,
+        "Shi-Tomasi (detected)",
+        (45, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        (255, 255, 255),
+        1,
+    )
+    diamond_pts = np.array([[30, 90], [34, 94], [30, 98], [26, 94]], np.int32)
+    cv2.fillPoly(vis, [diamond_pts], (200, 200, 200))
+    cv2.polylines(vis, [diamond_pts], True, (255, 255, 255), 1)
+    cv2.putText(
+        vis,
+        "CoTracker (predicted)",
+        (45, 100),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        (255, 255, 255),
+        1,
+    )
+    cv2.line(vis, (20, 110), (240, 110), (255, 255, 255), 1)
+    cv2.putText(
+        vis,
+        f"Shi-Tomasi: {total_shi_tomasi}",
+        (20, 125),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        (0, 255, 0),
+        1,
+    )
+    cv2.putText(
+        vis,
+        f"CoTracker: {total_cotracker}",
+        (20, 140),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        (255, 0, 0),
+        1,
+    )
+    cv2.putText(
+        vis,
+        f"Frame {current_frame}",
+        (w - 150, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+    )
+    return vis
 
 
 def _extract_scene_points(
@@ -529,6 +867,8 @@ def _update_track_voxel_maps(
 def _merge_track_voxel_clouds(
     voxel_maps: dict[int, OnlineVoxelMap],
     track_colors: dict[int, np.ndarray],
+    final_voxel_size: float = 0.0,
+    max_points: int = 0,
 ) -> tuple[np.ndarray, Optional[np.ndarray]]:
     voxel_clouds: list[tuple[int, np.ndarray]] = []
     for track_id in sorted(voxel_maps):
@@ -536,7 +876,13 @@ def _merge_track_voxel_clouds(
         if len(points) == 0:
             continue
         voxel_clouds.append((track_id, points))
-    return _merge_track_clouds(voxel_clouds, track_colors)
+    points, colors = _merge_track_clouds(voxel_clouds, track_colors)
+    points, colors = _voxel_downsample(points, colors, final_voxel_size)
+    if max_points > 0 and len(points) > max_points:
+        sample_indices = np.linspace(0, len(points) - 1, max_points, dtype=np.int64)
+        points = points[sample_indices]
+        colors = colors[sample_indices] if colors is not None else None
+    return points, colors
 
 
 def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
@@ -557,6 +903,27 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             DEFAULT_CONFIG["track_accum_voxel_size"],
         )
     )
+    track_accum_log_stride = max(
+        1,
+        int(
+            getattr(
+                rr_args,
+                "track_accum_log_stride",
+                DEFAULT_CONFIG["track_accum_log_stride"],
+            )
+        ),
+    )
+    track_accum_max_points = int(
+        getattr(
+            rr_args,
+            "track_accum_max_points",
+            DEFAULT_CONFIG["track_accum_max_points"],
+        )
+    )
+    keypoint_history = max(
+        0,
+        int(getattr(rr_args, "keypoint_history", DEFAULT_CONFIG["keypoint_history"])),
+    )
     enable_sor = bool(getattr(rr_args, "enable_sor", DEFAULT_CONFIG["enable_sor"]))
 
     rr.script_setup(rr_args, "3d_tracker_rrd")
@@ -567,14 +934,18 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
         static=True,
     )
     blueprint_sent = False
+    keypoint_history_by_track: dict[int, list[tuple[int, np.ndarray]]] = {}
 
-    for frame_path in tqdm(
-        frame_paths, desc="Writing Rerun frames", unit="frame", dynamic_ncols=True
+    for frame_offset, frame_path in enumerate(
+        tqdm(frame_paths, desc="Writing Rerun frames", unit="frame", dynamic_ncols=True)
     ):
         payload = _load_frame_payload(frame_path)
         frame_id = int(payload["frame_id"])
         image = np.asarray(payload["image"])
         masks = payload["masks"]
+        keypoints = payload["keypoints"]
+        moving_keypoints = payload["moving_keypoints"]
+        keypoint_vis = payload["keypoint_vis"]
         object_states = payload["object_states"]
         point_cloud = np.asarray(payload["point_cloud"], dtype=np.float32)
         intrinsic = np.asarray(payload["intrinsic"], dtype=np.float32)
@@ -593,6 +964,29 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             alpha=float(DEFAULT_CONFIG["mask_alpha"]),
         )
         rr.log(ENTITY_MASKED_IMAGE, rr.Image(masked_image, color_model="bgr"))
+
+        _update_keypoint_history(
+            keypoint_history_by_track, frame_id, keypoint_vis, keypoint_history
+        )
+        keypoint_image = (
+            _render_keypoint_vis_image(
+                image,
+                frame_id,
+                keypoint_vis,
+                keypoint_history_by_track,
+                track_colors,
+                show_history=keypoint_history,
+            )
+            if keypoint_vis
+            else _render_keypoint_image(
+                image,
+                masks,
+                keypoints,
+                moving_keypoints,
+                track_colors,
+            )
+        )
+        rr.log(ENTITY_KEYPOINT_IMAGE, rr.Image(keypoint_image, color_model="bgr"))
         if not blueprint_sent:
             blueprint = _build_blueprint()
             if blueprint is not None:
@@ -636,18 +1030,25 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             voxel_size=track_accum_voxel_size,
             enable_sor=enable_sor,
         )
-        merged_voxel_points, merged_voxel_colors = _merge_track_voxel_clouds(
-            voxel_maps,
-            track_colors,
+        should_log_accum = (
+            frame_offset % track_accum_log_stride == 0
+            or frame_offset == len(frame_paths) - 1
         )
-        _log_points(
-            merged_voxel_points,
-            merged_voxel_colors,
-            ENTITY_TRACK_VOXELS,
-            subsample=int(DEFAULT_CONFIG["track_voxels_sub"]),
-            static=False,
-            radius=float(DEFAULT_CONFIG["track_voxels_radius"]),
-        )
+        if should_log_accum:
+            merged_voxel_points, merged_voxel_colors = _merge_track_voxel_clouds(
+                voxel_maps,
+                track_colors,
+                final_voxel_size=track_accum_voxel_size,
+                max_points=track_accum_max_points,
+            )
+            _log_points(
+                merged_voxel_points,
+                merged_voxel_colors,
+                ENTITY_TRACK_VOXELS,
+                subsample=int(DEFAULT_CONFIG["track_voxels_sub"]),
+                static=False,
+                radius=float(DEFAULT_CONFIG["track_voxels_radius"]),
+            )
 
     rr.script_teardown(rr_args)
     logger.info("Saved %s", rr_args.save)
@@ -679,7 +1080,25 @@ def main() -> None:
         "--track-accum-voxel-size",
         type=float,
         default=float(DEFAULT_CONFIG["track_accum_voxel_size"]),
-        help="Voxel size for accumulated track geometry.",
+        help="Voxel size for accumulated track geometry before logging.",
+    )
+    parser.add_argument(
+        "--track-accum-log-stride",
+        type=int,
+        default=int(DEFAULT_CONFIG["track_accum_log_stride"]),
+        help="Log accumulated track geometry every N frames to reduce .rrd size.",
+    )
+    parser.add_argument(
+        "--track-accum-max-points",
+        type=int,
+        default=int(DEFAULT_CONFIG["track_accum_max_points"]),
+        help="Maximum accumulated track points to log per accumulated frame. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--keypoint-history",
+        type=int,
+        default=int(DEFAULT_CONFIG["keypoint_history"]),
+        help="Number of previous frames to use for CoTracker keypoint trails.",
     )
     parser.add_argument(
         "--enable-sor",
