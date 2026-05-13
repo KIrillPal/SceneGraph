@@ -801,6 +801,7 @@ def _log_points(
 def _log_track_id_labels(
     clouds: list[tuple[int, np.ndarray]],
     track_colors: dict[int, np.ndarray],
+    track_classes: dict[int, str],
     label_radius: float = 0.02,
 ) -> None:
     if not clouds:
@@ -816,7 +817,8 @@ def _log_track_id_labels(
     colors_rgb: list[np.ndarray] = []
     for track_id, points in clouds:
         centers.append(np.mean(points, axis=0))
-        labels.append(str(track_id))
+        class_name = track_classes.get(int(track_id), "")
+        labels.append(f"{class_name} #{track_id}" if class_name else str(track_id))
         colors_rgb.append(track_colors[int(track_id)])
     rr.log(
         ENTITY_TRACK_LABELS,
@@ -829,6 +831,14 @@ def _log_track_id_labels(
         ),
         static=False,
     )
+
+
+def _track_classes_from_masks(masks: dict[str, dict[int, np.ndarray]]) -> dict[int, str]:
+    track_classes: dict[int, str] = {}
+    for class_name, track_map in masks.items():
+        for track_id in track_map:
+            track_classes[int(track_id)] = str(class_name)
+    return track_classes
 
 
 def _merge_track_clouds(
@@ -1010,7 +1020,7 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             voxel_size=track_voxel_size,
             enable_sor=enable_sor,
         )
-        _log_track_id_labels(track_clouds, track_colors)
+        _log_track_id_labels(track_clouds, track_colors, _track_classes_from_masks(masks))
         track_points, track_point_colors = _merge_track_clouds(
             track_clouds, track_colors
         )
