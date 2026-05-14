@@ -882,10 +882,10 @@ class Simple3DTracker:
                         )
                         track.src_3d_keypoints = src_3d_keypoints
 
-                        obj_queries = torch.tensor([
-                            [local_frame, q[0], q[1]]
-                            for q in chosen_keypoints
-                        ])
+                        obj_queries = torch.tensor(
+                            [[local_frame, q[0], q[1]] for q in chosen_keypoints],
+                            dtype=torch.float32,
+                        )
                         queries.append(obj_queries)
                         queries_by_object.append(
                             torch.ones(len(obj_queries), dtype=int) * track.id
@@ -910,16 +910,20 @@ class Simple3DTracker:
                 track.current_3d_keypoints = None
             return
         
-        queries_tensor = torch.cat(queries)
+        queries_tensor = torch.cat(queries).to(device=self.device, dtype=torch.float32)
         obj_tensor = torch.cat(queries_by_object)
+        video_chunk = self.video[start_frame:fin_frame].unsqueeze(0).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
         
         self.point_tracker(
-            video_chunk=self.video[start_frame:fin_frame].unsqueeze(0).to(self.device),
+            video_chunk=video_chunk,
             is_first_step=True,
-            queries=queries_tensor.unsqueeze(0).to(self.device)
+            queries=queries_tensor.unsqueeze(0)
         )
         points, visibilities = self.point_tracker(
-            video_chunk=self.video[start_frame:fin_frame].unsqueeze(0).to(self.device)
+            video_chunk=video_chunk
         )
         
         points_ = points[0][-1].cpu().detach().numpy()
