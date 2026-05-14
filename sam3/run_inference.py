@@ -1,8 +1,12 @@
 import argparse
 import os
 
+# Keep SAM3 internals quiet; this script exposes one object-level progress bar.
+os.environ["TQDM_DISABLE"] = "1"
+
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 from sam3.model_builder import build_sam3_video_predictor
 from utils import (
@@ -48,7 +52,15 @@ save_embeddings(frame_embeds, save_path=args.save_path)
 object_names = read_object_names(args.txt_path)
 # Segment with text prompt
 preds = {}
-for name in object_names:
+object_progress = tqdm(
+    object_names,
+    desc="SAM3 objects",
+    unit="object",
+    dynamic_ncols=True,
+    disable=False,
+)
+for name in object_progress:
+    object_progress.set_postfix_str(f"current={name}")
     text_prompt = {"text": name}
     outputs_per_frame = segment_on_vigeo(predictor, args.image_folder, text_prompt, prompt_idx=0)
     preds[name]=outputs_per_frame

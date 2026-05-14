@@ -9,6 +9,7 @@ import torch
 import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
+from tqdm.auto import tqdm
 from typing import Tuple, List, Optional, Union
 from config_loader import cfg
 
@@ -203,7 +204,12 @@ def get_da3_pointclouds(
     pixels_per_frame = []
     frame_intrinsics = []
     # Process each frame
-    for i in range(N):
+    for i in tqdm(
+        range(N),
+        desc="Filtering DA3 point clouds",
+        unit="frame",
+        dynamic_ncols=True,
+    ):
         data = np.load(f"{depth_dir}frame_{i}.npz")
         
         image = data["image"]      # [H, W, 3] uint8
