@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sequential end-to-end pipeline runner for an input MP4 video."""
+"""Sequential end-to-end pipeline runner for an input video or image folder."""
 
 from __future__ import annotations
 
@@ -25,15 +25,21 @@ def parse_args() -> argparse.Namespace:
         description="Run frame extraction, keyframe selection, Qwen, DA3, SAM3, and tracker sequentially.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("input_video", type=Path, nargs="?", help="Input .mp4 video")
+    parser.add_argument("input_path", type=Path, nargs="?", help="Input .mp4 video or image folder")
     parser.add_argument("--video", type=Path, default=None, help="Input .mp4 video")
+    parser.add_argument("--image-folder", type=Path, default=None, help="Input folder with extracted images")
     parser.add_argument(
         "--scene-id",
         default=None,
-        help="Scene id under data/. Defaults to input video stem",
+        help="Scene id under data/. Defaults to input stem",
     )
     parser.add_argument("--data-root", type=Path, default=REPO_ROOT / "data")
-    parser.add_argument("--fps", type=float, default=10.0, help="Frame extraction FPS")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Frame extraction FPS for video input. Defaults to 10.0 for video input; invalid with image folders.",
+    )
     parser.add_argument("--num-keyframes", type=int, default=30)
     parser.add_argument(
         "--gpus",
@@ -101,9 +107,38 @@ def parse_args() -> argparse.Namespace:
         help="Do not stop a Qwen server started by this script",
     )
     args = parser.parse_args()
-    args.video = args.video or args.input_video
-    if args.video is None:
-        parser.error("provide an input video as positional argument or with --video")
+    fps_was_set = hasattr(args, "fps")
+    explicit_inputs = [value for value in (args.input_path, args.video, args.image_folder) if value is not None]
+    if len(explicit_inputs) == 0:
+        parser.error("provide an input video/image folder, --video, or --image-folder")
+    if len(explicit_inputs) > 1:
+        parser.error("provide only one input source")
+
+    if args.image_folder is not None:
+        args.input_mode = "images"
+        args.input_source = args.image_folder
+        args.video = None
+    elif args.video is not None:
+        args.input_mode = "video"
+        args.input_source = args.video
+        args.image_folder = None
+    elif args.input_path.is_dir():
+        args.input_mode = "images"
+        args.input_source = args.input_path
+        args.image_folder = args.input_path
+        args.video = None
+    else:
+        args.input_mode = "video"
+        args.input_source = args.input_path
+        args.video = args.input_path
+        args.image_folder = None
+
+    if args.input_mode == "images" and fps_was_set:
+        parser.error("--fps is only valid with video input; omit it when using --image-folder or an image folder input")
+    if args.input_mode == "video" and not fps_was_set:
+        args.fps = 10.0
+    if args.input_mode == "images":
+        args.fps = None
     return args
 
 
@@ -347,6 +382,39 @@ def copy_video(video: Path, scene_dir: Path, overwrite: bool, dry_run: bool) -> 
         else:
             shutil.copy2(video, dest)
     return dest
+
+
+def copy_image_folder(image_folder: Path, scene_dir: Path, overwrite: bool, dry_run: bool) -> Path:
+    image_folder = image_folder.resolve()
+    images = list_images(image_folder)
+    if not images:
+        raise FileNotFoundError(f"Input image folder has no supported images: {image_folder}")
+
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    dest = scene_dir / "images"
+    if dest.exists() and image_folder == dest.resolve():
+        return dest
+    if list_images(dest) and not overwrite:
+        print(f"Skipping image copy; found images in {dest}")
+        return dest
+    remove_if_overwrite(dest, overwrite)
+
+    if dry_run:
+        print(f"+ copy_images {image_folder} {dest}")
+        return dest
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for image in images:
+        shutil.copy2(image, dest / image.name)
+    ensure_dir_has_files(dest, "Image copy produced no images")
+    return dest
+
+
+def prepare_image_folder(args: argparse.Namespace, scene_dir: Path) -> None:
+    if args.skip_frame_extraction:
+        ensure_dir_has_files(scene_dir / "images", "Image preparation skipped but images are missing")
+        return
+    copy_image_folder(args.image_folder, scene_dir, args.overwrite, args.dry_run)
 
 
 def run_frame_extraction(args: argparse.Namespace, worker_gpu: str, scene_dir: Path, video_path: Path) -> None:
@@ -710,9 +778,11 @@ def main() -> None:
 
     configure_hf(args)
 
-    scene_id = args.scene_id or args.video.stem
+    scene_id = args.scene_id or args.input_source.stem
     scene_dir = args.data_root / scene_id
-    video_path = copy_video(args.video, scene_dir, args.overwrite, args.dry_run)
+    video_path = None
+    if args.input_mode == "video":
+        video_path = copy_video(args.video, scene_dir, args.overwrite, args.dry_run)
     log_dir = (args.log_dir or (scene_dir / "logs")).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -720,8 +790,12 @@ def main() -> None:
         "status": "running",
         "scene_id": scene_id,
         "scene_dir": str(scene_dir),
-        "input_video": str(args.video.resolve()),
-        "copied_video": str(video_path),
+        "input_mode": args.input_mode,
+        "input_source": str(args.input_source.resolve()),
+        "input_video": str(args.video.resolve()) if args.video is not None else None,
+        "input_image_folder": str(args.image_folder.resolve()) if args.image_folder is not None else None,
+        "copied_video": str(video_path) if video_path is not None else None,
+        "images_dir": str(scene_dir / "images"),
         "started_at": now_iso(),
         "worker_gpu": worker_gpu,
         "qwen_gpu": qwen_gpu,
@@ -744,12 +818,16 @@ def main() -> None:
 
     print(f"Scene directory: {scene_dir}")
     print(f"Log directory: {log_dir}")
+    print(f"Input mode: {args.input_mode}")
     print(f"HF cache directory: {args.hf_cache_dir}")
     print(f"HF token present: {args.hf_token_present}")
     print(f"Worker GPU: {worker_gpu}; Qwen GPU: {qwen_gpu}")
 
     try:
-        run_stage(summary, log_dir, "extract_frames", run_frame_extraction, args, worker_gpu, scene_dir, video_path)
+        if args.input_mode == "video":
+            run_stage(summary, log_dir, "extract_frames", run_frame_extraction, args, worker_gpu, scene_dir, video_path)
+        else:
+            run_stage(summary, log_dir, "prepare_images", prepare_image_folder, args, scene_dir)
         run_stage(summary, log_dir, "select_keyframes", run_keyframes, args, worker_gpu, scene_dir)
         run_stage(summary, log_dir, "qwen_objects", run_qwen_objects, args, qwen_gpu, scene_dir)
         run_stage(summary, log_dir, "da3", run_da3, args, worker_gpu, scene_dir)
