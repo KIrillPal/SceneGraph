@@ -21,6 +21,7 @@ from config_loader import cfg
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Any
 from cotracker.predictor import CoTrackerOnlinePredictor
+from scipy.optimize import linear_sum_assignment
 
 
 # ============================================================================
@@ -478,9 +479,7 @@ class Track:
         H: int,
         W: int
     ):
-        """
-        Update visibility from CoTracker output (when track IS in CoTracker output).
-        """
+        """Update visibility from CoTracker output with drift rejection."""
         if not self.is_dynamic:
             self.visibility_state = "VISIBLE"
             self.cotracker_is_visible = True
@@ -494,7 +493,6 @@ class Track:
         in_frame_x = (track_points[:, 0] >= 0) & (track_points[:, 0] < W)
         in_frame_y = (track_points[:, 1] >= 0) & (track_points[:, 1] < H)
         in_frame = in_frame_x & in_frame_y
-        
         visible = track_visibilities > cfg.cotracker.visibility_thresh
         
         valid_points = np.sum(in_frame & visible)
@@ -503,11 +501,22 @@ class Track:
         outside_points = np.sum(~in_frame)
         
         if np.sum(in_frame) > 0:
-            self.predicted_pos_2d = np.mean(track_points[in_frame], axis=0)
+            current_center = np.mean(track_points[in_frame], axis=0)
         else:
-            self.predicted_pos_2d = np.mean(track_points, axis=0) if len(track_points) > 0 else None
+            current_center = np.mean(track_points, axis=0)
         
-        self.last_predicted_pos_2d = self.predicted_pos_2d.copy() if self.predicted_pos_2d is not None else None
+        max_drift = getattr(cfg.cotracker, "max_drift_px", 150.0)
+        if self.last_predicted_pos_2d is not None:
+            drift = np.linalg.norm(current_center - self.last_predicted_pos_2d)
+            if drift > max_drift:
+                self.visibility_state = "OCCLUDED"
+                self.cotracker_is_visible = True
+                self.predicted_pos_2d = current_center
+                self.last_predicted_pos_2d = current_center.copy()
+                return
+        
+        self.predicted_pos_2d = current_center
+        self.last_predicted_pos_2d = current_center.copy()
         
         if valid_points >= max(cfg.cotracker.min_keypoints_visible, total_points * 0.3):
             self.visibility_state = "VISIBLE"
@@ -522,65 +531,6 @@ class Track:
             self.visibility_state = "OCCLUDED"
             self.cotracker_is_visible = True
     
-    def update_visibility_with_extrinsics_compensation(
-        self,
-        frame_id: int,
-        H: int,
-        W: int,
-        intrinsics: np.ndarray,
-        extrinsics: np.ndarray
-    ):
-        """Update visibility for tracks absent from CoTracker using camera pose."""
-        if not self.is_dynamic:
-            self.visibility_state = "VISIBLE"
-            self.cotracker_is_visible = True
-            return
-
-        self.update_moving_keypoints_with_extrinsics(frame_id, intrinsics, extrinsics, H, W)
-
-        if frame_id not in self.moving_keypoints or len(self.moving_keypoints[frame_id]) == 0:
-            if self.center_3d is None or len(self.center_3d) == 0:
-                self.visibility_state = "OCCLUDED"
-                self.cotracker_is_visible = False
-                self.frames_without_cotracker += 1
-                return
-
-            center_keypoint, valid = _project_3d_points_to_2d(
-                self.center_3d.reshape(1, -1), intrinsics, extrinsics
-            )
-            if len(valid) == 0 or not valid[0]:
-                self.visibility_state = "OUTSIDE_FRAME"
-                self.cotracker_is_visible = False
-                self.frames_without_cotracker += 1
-                return
-            self.moving_keypoints[frame_id] = center_keypoint[valid]
-
-        current_keypoints = self.moving_keypoints[frame_id]
-        in_frame = (
-            (current_keypoints[:, 0] >= 0) & (current_keypoints[:, 0] < W) &
-            (current_keypoints[:, 1] >= 0) & (current_keypoints[:, 1] < H)
-        )
-        inside_count = np.sum(in_frame)
-        total_count = len(current_keypoints)
-
-        self.predicted_pos_2d = (
-            np.mean(current_keypoints[in_frame], axis=0)
-            if inside_count > 0
-            else np.mean(current_keypoints, axis=0)
-        )
-        self.last_predicted_pos_2d = self.predicted_pos_2d.copy()
-        self.frames_without_cotracker += 1
-
-        if inside_count >= max(cfg.cotracker.min_keypoints_visible, total_count * 0.3):
-            self.visibility_state = "VISIBLE"
-            self.cotracker_is_visible = True
-        elif inside_count >= max(2, total_count * 0.15):
-            self.visibility_state = "OCCLUDED"
-            self.cotracker_is_visible = True
-        else:
-            self.visibility_state = "OUTSIDE_FRAME"
-            self.cotracker_is_visible = False
-
     def update_moving_keypoints_with_extrinsics(
         self,
         frame_id: int,
@@ -604,8 +554,77 @@ class Track:
             (keypoints_2d[:, 0] >= 0) & (keypoints_2d[:, 0] < W) &
             (keypoints_2d[:, 1] >= 0) & (keypoints_2d[:, 1] < H)
         )
+        max_drift = getattr(cfg.cotracker, "max_drift_px", 150.0)
+        if self.last_predicted_pos_2d is not None:
+            drift_ok = np.linalg.norm(keypoints_2d - self.last_predicted_pos_2d, axis=1) < max_drift
+            in_frame = in_frame & drift_ok
+        elif np.sum(in_frame) > 0:
+            self.last_predicted_pos_2d = np.mean(keypoints_2d[in_frame], axis=0)
+
         if np.sum(in_frame) > 0:
             self.moving_keypoints[frame_id] = keypoints_2d[in_frame]
+            self.predicted_pos_2d = np.mean(self.moving_keypoints[frame_id], axis=0)
+
+    def update_visibility_with_extrinsics_compensation(
+        self,
+        frame_id: int,
+        H: int,
+        W: int,
+        intrinsics: np.ndarray,
+        extrinsics: np.ndarray
+    ):
+        """Update visibility for tracks absent from CoTracker using camera pose."""
+        if not self.is_dynamic:
+            self.visibility_state = "VISIBLE"
+            self.cotracker_is_visible = True
+            return
+
+        self.update_moving_keypoints_with_extrinsics(frame_id, intrinsics, extrinsics, H, W)
+
+        if frame_id not in self.moving_keypoints or len(self.moving_keypoints[frame_id]) == 0:
+            if self.center_3d is not None and len(self.center_3d) > 0:
+                center_keypoint, valid = _project_3d_points_to_2d(
+                    self.center_3d.reshape(1, -1), intrinsics, extrinsics
+                )
+                if len(valid) > 0 and valid[0]:
+                    max_drift = getattr(cfg.cotracker, "max_drift_px", 150.0)
+                    if self.last_predicted_pos_2d is not None:
+                        drift = np.linalg.norm(center_keypoint[0] - self.last_predicted_pos_2d)
+                        if drift < max_drift:
+                            self.moving_keypoints[frame_id] = center_keypoint[valid]
+                    else:
+                        self.moving_keypoints[frame_id] = center_keypoint[valid]
+                        self.last_predicted_pos_2d = center_keypoint[0].copy()
+
+        if frame_id in self.moving_keypoints and len(self.moving_keypoints[frame_id]) > 0:
+            current_keypoints = self.moving_keypoints[frame_id]
+            in_frame = (
+                (current_keypoints[:, 0] >= 0) & (current_keypoints[:, 0] < W) &
+                (current_keypoints[:, 1] >= 0) & (current_keypoints[:, 1] < H)
+            )
+            inside_count = int(np.sum(in_frame))
+            total_count = len(current_keypoints)
+
+            self.predicted_pos_2d = (
+                np.mean(current_keypoints[in_frame], axis=0)
+                if inside_count > 0
+                else np.mean(current_keypoints, axis=0)
+            )
+            self.last_predicted_pos_2d = self.predicted_pos_2d.copy()
+
+            if inside_count >= max(cfg.cotracker.min_keypoints_visible, total_count * 0.3):
+                self.visibility_state = "VISIBLE"
+                self.cotracker_is_visible = True
+            elif inside_count >= max(2, total_count * 0.15):
+                self.visibility_state = "OCCLUDED"
+                self.cotracker_is_visible = True
+            else:
+                self.visibility_state = "OUTSIDE_FRAME"
+                self.cotracker_is_visible = False
+        else:
+            self.visibility_state = "OCCLUDED"
+            self.cotracker_is_visible = False
+            self.frames_without_cotracker += 1
     
     def should_allow_association(self, visual_sim: float, emb_threshold: float) -> bool:
         """
@@ -820,7 +839,7 @@ class Simple3DTracker:
     ) -> None:
         """
         Compute rigid transform for moving tracks using CoTracker.
-        Updates visibility for ALL tracks using EXTRINSICS for compensation.
+        Source/target 3D points are aligned with the selected query keypoints.
         """
         queries = []
         queries_by_object = []
@@ -828,6 +847,7 @@ class Simple3DTracker:
         fin_frame = frame_id + 1
         
         all_tracks_to_track = self.tracks + self.lost_tracks
+        use_moving_keypoints = getattr(cfg.cotracker, "use_moving_keypoints", True)
         
         for track in all_tracks_to_track:
             if not track.is_dynamic:
@@ -835,29 +855,59 @@ class Simple3DTracker:
             
             if (track.motion_state.status == "MOVING" and
                 track.time_since_update < self.cotracker_window_len):
-                last_frame_detected = max(track.keypoints.keys()) if track.keypoints else -1
-                if last_frame_detected >= 0 and track.keypoints[last_frame_detected] is not None:
-                    local_frame = last_frame_detected - start_frame
-                    obj_queries = torch.tensor([
-                        [local_frame, q[0], q[1]]
-                        for q in track.keypoints[last_frame_detected]
-                    ])
-                    queries.append(obj_queries)
-                    queries_by_object.append(
-                        torch.ones(len(obj_queries), dtype=int) * track.id
-                    )
+                last_frame = max(track.keypoints.keys()) if track.keypoints else -1
+                chosen_keypoints = None
+
+                if (use_moving_keypoints and last_frame >= 0 and
+                    last_frame in track.moving_keypoints):
+                    moving_points = track.moving_keypoints[last_frame]
+                    if moving_points is not None:
+                        in_bounds = (
+                            (moving_points[:, 0] >= 0) & (moving_points[:, 0] < self.W) &
+                            (moving_points[:, 1] >= 0) & (moving_points[:, 1] < self.H)
+                        )
+                        if np.sum(in_bounds) >= cfg.cotracker.min_keypoints_for_transform:
+                            chosen_keypoints = moving_points[in_bounds]
+
+                if chosen_keypoints is None and last_frame >= 0 and last_frame in track.keypoints:
+                    static_points = track.keypoints[last_frame]
+                    if static_points is not None:
+                        chosen_keypoints = static_points
+
+                if chosen_keypoints is not None and len(chosen_keypoints) > 0:
+                    local_frame = last_frame - start_frame
+                    if 0 <= local_frame < self.cotracker_window_len:
+                        src_3d_keypoints, _ = _get_3d_for_keypoints(
+                            chosen_keypoints, points_2d, points_3d
+                        )
+                        track.src_3d_keypoints = src_3d_keypoints
+
+                        obj_queries = torch.tensor([
+                            [local_frame, q[0], q[1]]
+                            for q in chosen_keypoints
+                        ])
+                        queries.append(obj_queries)
+                        queries_by_object.append(
+                            torch.ones(len(obj_queries), dtype=int) * track.id
+                        )
+                    else:
+                        track.src_3d_keypoints = None
+                else:
+                    track.src_3d_keypoints = None
+            else:
+                track.src_3d_keypoints = None
         
-        # Get current extrinsics
-        current_extrinsics,current_intrinsics = self._get_current_extrinsics(frame_id)
+        current_extrinsics, current_intrinsics = self._get_current_extrinsics(frame_id)
         
         if len(queries) == 0:
-            # No CoTracker output - update all with extrinsics compensation
             for track in all_tracks_to_track:
                 if track.is_dynamic and current_extrinsics is not None:
                     track.update_visibility_with_extrinsics_compensation(
                         frame_id, self.H, self.W,
                         current_intrinsics, current_extrinsics
                     )
+                track.src_3d_keypoints = None
+                track.current_3d_keypoints = None
             return
         
         queries_tensor = torch.cat(queries)
@@ -884,20 +934,19 @@ class Simple3DTracker:
         )
         valid_mask = valid_mask * visible
         
-        # Update visibility for ALL tracks
         for track in all_tracks_to_track:
             track_mask = obj_tensor == track.id
             
             if torch.sum(track_mask) == 0:
-                # Track NOT in CoTracker output - use EXTRINSICS compensation
                 if track.is_dynamic and current_extrinsics is not None:
                     track.update_visibility_with_extrinsics_compensation(
                         frame_id, self.H, self.W,
                         current_intrinsics, current_extrinsics
                     )
+                track.src_3d_keypoints = None
+                track.current_3d_keypoints = None
                 continue
             
-            # Track IS in CoTracker output - use actual predictions
             track_mask_np = track_mask.cpu().numpy()
             track_points = points_[track_mask_np]
             track_visibilities = visibilities_[track_mask_np]
@@ -908,74 +957,52 @@ class Simple3DTracker:
             
             if track.is_dynamic and track.motion_state.status == "MOVING":
                 track.moving_keypoints[frame_id] = track_points[visible[track_mask_np]]
-
-                valid_3d = keypoints_3d[track_mask_np][valid_mask[track_mask_np]]
+                track.current_3d_keypoints = keypoints_3d[track_mask_np]
+                valid_3d = track.current_3d_keypoints[valid_mask[track_mask_np]]
                 if len(valid_3d) > 0:
                     track.last_3d_keypoints = valid_3d.copy()
+            else:
+                track.current_3d_keypoints = None
         
-        # Compute transforms
         for track in self.tracks:
             if not track.is_dynamic or not track.cotracker_is_visible:
                 track.transform = np.eye(4)
                 continue
             
-            track_mask = obj_tensor == track.id
-            track_mask_np = track_mask.cpu().numpy()
-            new_keypoints_3d = keypoints_3d[track_mask_np]
-            new_valid_mask = valid_mask[track_mask_np]
-            
-            if len(new_valid_mask) == 0:
-                track.transform = np.eye(4)
-                continue
-            
-            last_frame_detected = max(track.keypoints.keys()) if track.keypoints else -1
-            if (last_frame_detected < 0 or 
-                track.keypoints[last_frame_detected] is None or 
-                len(track.keypoints[last_frame_detected]) == 0):
-                track.transform = np.eye(4)
-                continue
-            
-            cur_keypoints_3d, cur_valid_mask = _get_3d_for_keypoints(
-                track.keypoints[last_frame_detected], points_2d, points_3d
-            )
-            good_point_mask = cur_valid_mask & new_valid_mask
-            
-            if np.sum(good_point_mask) < cfg.cotracker.min_keypoints_for_transform:
-                track.transform = np.eye(4)
-                continue
-            
-            cur_pcd = o3d.geometry.PointCloud()
-            cur_pcd.points = o3d.utility.Vector3dVector(
-                cur_keypoints_3d[good_point_mask]
-            )
-            new_pcd = o3d.geometry.PointCloud()
-            new_pcd.points = o3d.utility.Vector3dVector(
-                new_keypoints_3d[good_point_mask]
-            )
-            
-            indices_2d = np.array([
-                (i, i) for i in range(len(new_keypoints_3d[good_point_mask]))
-            ])
-            corres = o3d.utility.Vector2iVector(indices_2d)
-            
-            p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
-            transformation = p2p.compute_transformation(cur_pcd, new_pcd, corres)
-            
-            if len(corres) > 0:
-                rmse = p2p.compute_rmse(cur_pcd, new_pcd, corres)
-                if rmse > cfg.cotracker.max_rmse:
-                    print(f'Track {track.id}: suspicious transform (RMSE={rmse:.3f})')
-                    track.transform = np.eye(4)
-                    track.last_3d_keypoints = track.stable_3d_keypoints
-                    if current_extrinsics is not None:
-                        track.update_visibility_with_extrinsics_compensation(
-                            frame_id, self.H, self.W,
-                            current_intrinsics, current_extrinsics
+            src_pts = getattr(track, "src_3d_keypoints", None)
+            tgt_pts = getattr(track, "current_3d_keypoints", None)
+            transform_success = False
+
+            if (src_pts is not None and tgt_pts is not None and
+                len(src_pts) == len(tgt_pts) and len(src_pts) > 0):
+                track_mask = obj_tensor == track.id
+                indices = torch.nonzero(track_mask, as_tuple=True)[0].cpu().numpy()
+                if len(indices) > 0:
+                    track_valid = valid_mask[indices]
+                    depth_ok = (src_pts[:, 2] > 0.1) & (tgt_pts[:, 2] > 0.1)
+                    good_mask = track_valid & depth_ok
+
+                    if np.sum(good_mask) >= cfg.cotracker.min_keypoints_for_transform:
+                        cur_pcd = o3d.geometry.PointCloud()
+                        cur_pcd.points = o3d.utility.Vector3dVector(src_pts[good_mask])
+                        new_pcd = o3d.geometry.PointCloud()
+                        new_pcd.points = o3d.utility.Vector3dVector(tgt_pts[good_mask])
+                        corres = o3d.utility.Vector2iVector(
+                            np.array([(i, i) for i in range(len(src_pts[good_mask]))])
                         )
-                else:
-                    track.transform = transformation
-                    track.stable_3d_keypoints = track.last_3d_keypoints
-            else:
+
+                        p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+                        transformation = p2p.compute_transformation(cur_pcd, new_pcd, corres)
+                        rmse = p2p.compute_rmse(cur_pcd, new_pcd, corres)
+                        if rmse <= cfg.cotracker.max_rmse:
+                            track.transform = transformation
+                            track.last_3d_keypoints = tgt_pts[good_mask].copy()
+                            track.stable_3d_keypoints = track.last_3d_keypoints.copy()
+                            transform_success = True
+                        else:
+                            print(f"Track {track.id}: suspicious transform (RMSE={rmse:.3f})")
+
+            if not transform_success:
                 track.transform = np.eye(4)
                 track.last_3d_keypoints = track.stable_3d_keypoints
                 if current_extrinsics is not None:
@@ -983,6 +1010,9 @@ class Simple3DTracker:
                         frame_id, self.H, self.W,
                         current_intrinsics, current_extrinsics
                     )
+
+            track.src_3d_keypoints = None
+            track.current_3d_keypoints = None
     
     def update(
         self,
@@ -991,210 +1021,128 @@ class Simple3DTracker:
         points_2d: np.ndarray,
         points_3d: np.ndarray
     ) -> List[Track]:
-        """Main tracking update step."""
+        """Main tracking update step with global assignment per track stage."""
         
         for track in self.tracks + self.lost_tracks:
             track.time_since_update += 1
-        
-        for track in self.tracks:
-            track.matched = False
-        
+
         self._compute_transform_for_moving_tracks(frame_id, points_2d, points_3d)
         
         matched_detections = set()
         active_tracks = [t for t in self.tracks if t.state == "active"]
         tentative_tracks = [t for t in self.tracks if t.state == "tentative"]
-        
-        active_track_vis_embs = np.array([t.embedding for t in active_tracks])
-        det_vis_embs = np.array([d["embedding"] for d in frame_detections])
-        vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, active_track_vis_embs, det_vis_embs)
-        active_track_vis_embs = _ensure_embedding_2d(active_track_vis_embs, vis_dim)
-        det_vis_embs = _ensure_embedding_2d(det_vis_embs, vis_dim)
-        
-        active_vis_norm = active_track_vis_embs / (np.linalg.norm(active_track_vis_embs, axis=1, keepdims=True) + 1e-8)
-        det_vis_norm = det_vis_embs / (np.linalg.norm(det_vis_embs, axis=1, keepdims=True) + 1e-8)
-        active_vis_sim_matrix = active_vis_norm @ det_vis_norm.T
-        
-        (_, _, active_filter_mask) = _compute_filter_matrices(
-            active_tracks, frame_detections, self.text_emb_threshold, self.max_dist_multiplier
+
+        def visual_similarity_matrix(tracks: List[Track], detections: List[Dict[str, Any]]) -> np.ndarray:
+            if len(tracks) == 0 or len(detections) == 0:
+                return np.zeros((len(tracks), len(detections)))
+
+            track_vis_embs = np.array([t.embedding for t in tracks])
+            det_vis_embs = np.array([d["embedding"] for d in detections])
+            vis_dim = _infer_embedding_dim(
+                cfg.embeddings.vis_embedding_dim,
+                track_vis_embs,
+                det_vis_embs,
+            )
+            track_vis_embs = _ensure_embedding_2d(track_vis_embs, vis_dim)
+            det_vis_embs = _ensure_embedding_2d(det_vis_embs, vis_dim)
+            track_norm = track_vis_embs / (np.linalg.norm(track_vis_embs, axis=1, keepdims=True) + 1e-8)
+            det_norm = det_vis_embs / (np.linalg.norm(det_vis_embs, axis=1, keepdims=True) + 1e-8)
+            return track_norm @ det_norm.T
+
+        def assign_tracks(
+            tracks: List[Track],
+            detections: List[Dict[str, Any]],
+            threshold: float,
+            prefer_sam_id: bool,
+        ) -> Tuple[List[Tuple[int, int, Track, Dict[str, Any]]], set, set]:
+            if len(tracks) == 0 or len(detections) == 0:
+                return [], set(), set()
+
+            visual_sim = visual_similarity_matrix(tracks, detections)
+            _, _, filter_mask = _compute_filter_matrices(
+                tracks, detections, self.text_emb_threshold, self.max_dist_multiplier
+            )
+            cost = np.full((len(tracks), len(detections)), 1e9)
+            valid = np.zeros((len(tracks), len(detections)), dtype=bool)
+
+            for track_idx, track in enumerate(tracks):
+                for det_idx, det in enumerate(detections):
+                    if not track.should_allow_association(visual_sim[track_idx, det_idx], self.emb_threshold):
+                        continue
+                    if len(filter_mask) > 0 and not filter_mask[track_idx, det_idx]:
+                        continue
+
+                    sim = calc_voxel_similarity(track, det, image_shape=(self.H, self.W))
+                    if sim <= threshold:
+                        continue
+
+                    if prefer_sam_id and det.get("sam_id") == track.sam_id:
+                        cost[track_idx, det_idx] = -1.0
+                    else:
+                        cost[track_idx, det_idx] = 1.0 - sim
+                    valid[track_idx, det_idx] = True
+
+            row_ind, col_ind = linear_sum_assignment(cost)
+            assignments = []
+            matched_track_indices = set()
+            matched_det_indices = set()
+            for row, col in zip(row_ind, col_ind):
+                if valid[row, col]:
+                    assignments.append((row, col, tracks[row], detections[col]))
+                    matched_track_indices.add(row)
+                    matched_det_indices.add(col)
+            return assignments, matched_track_indices, matched_det_indices
+
+        active_assignments, _, _ = assign_tracks(
+            active_tracks, frame_detections, self.ass_threshold, prefer_sam_id=True
         )
-        
-        for det_idx, det in enumerate(frame_detections):
-            for track_idx, track in enumerate(active_tracks):
-                if (not track.matched and
-                    det.get("sam_id") == track.sam_id):
-                    if len(active_filter_mask) > 0 and not active_filter_mask[track_idx, det_idx]:
-                        continue
-                    
-                    if  calc_voxel_similarity(track, det,image_shape=(self.H,self.W)) > self.ass_threshold:
-                        track.update(det, frame_id)
-                        track.matched = True
-                        matched_detections.add(id(det))
-                        break
-        
-        for det_idx, det in enumerate(frame_detections):
-            if id(det) in matched_detections:
-                continue
-            
-            best_track = None
-            best_sim = 0
-            
-            for track_idx, track in enumerate(active_tracks):
-                if track.matched:
-                    continue
-                
-                visual_sim = active_vis_sim_matrix[track_idx, det_idx]
-                
-                if not track.should_allow_association(visual_sim, self.emb_threshold):
-                    continue
-                
-                if track.is_dynamic and visual_sim > self.emb_threshold:
-                    if len(active_filter_mask) > 0:
-                        text_pass = _check_text_filter_only(
-                            track.text_embedding, det["text_embedding"],
-                            self.text_emb_threshold
-                        )
-                        if not text_pass:
-                            continue
-                else:
-                    if len(active_filter_mask) > 0 and not active_filter_mask[track_idx, det_idx]:
-                        continue
-                
-                sim = calc_voxel_similarity(track, det,image_shape=(self.H,self.W))
-                if sim > best_sim and sim > self.ass_threshold:
-                    best_sim = sim
-                    best_track = track
-            
-            if best_track:
-                best_track.update(det, frame_id)
-                best_track.matched = True
-                matched_detections.add(id(det))
-        
+        for _, _, track, det in active_assignments:
+            track.update(det, frame_id)
+            track.matched = True
+            matched_detections.add(id(det))
+
         revived_tracks = []
         unmatched_detections = [
             det for det in frame_detections if id(det) not in matched_detections
         ]
-        
-        if len(self.lost_tracks) > 0:
-            lost_track_vis_embs = np.array([t.embedding for t in self.lost_tracks])
-            lost_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, lost_track_vis_embs, lost_det_vis_embs)
-            lost_track_vis_embs = _ensure_embedding_2d(lost_track_vis_embs, vis_dim)
-            lost_det_vis_embs = _ensure_embedding_2d(lost_det_vis_embs, vis_dim)
-            
-            lost_vis_norm = lost_track_vis_embs / (np.linalg.norm(lost_track_vis_embs, axis=1, keepdims=True) + 1e-8)
-            lost_det_vis_norm = lost_det_vis_embs / (np.linalg.norm(lost_det_vis_embs, axis=1, keepdims=True) + 1e-8)
-            lost_vis_sim_matrix = lost_vis_norm @ lost_det_vis_norm.T
-        else:
-            lost_vis_sim_matrix = np.zeros((0, 0))
-        
-        (_, _, lost_filter_mask) = _compute_filter_matrices(
-            self.lost_tracks, unmatched_detections, self.text_emb_threshold, self.max_dist_multiplier
+
+        lost_assignments, matched_lost_idx, matched_lost_det_idx = assign_tracks(
+            self.lost_tracks, unmatched_detections, self.lost_ass_threshold, prefer_sam_id=False
         )
-        
-        for det_idx, det in enumerate(unmatched_detections[:]):
-            best_track = None
-            best_sim = 0
-            
-            for idx, track in enumerate(self.lost_tracks):
-                visual_sim = lost_vis_sim_matrix[idx, det_idx] if len(lost_vis_sim_matrix) > 0 else 0.0
-                
-                if not track.should_allow_association(visual_sim, self.emb_threshold):
-                    continue
-                
-                if track.is_dynamic and visual_sim > self.emb_threshold:
-                    if len(lost_filter_mask) > 0:
-                        text_pass = _check_text_filter_only(
-                            track.text_embedding, det["text_embedding"],
-                            self.text_emb_threshold
-                        )
-                        if not text_pass:
-                            continue
-                else:
-                    if len(lost_filter_mask) > 0 and not lost_filter_mask[idx, det_idx]:
-                        continue
-                
-                is_moving = track.motion_state.status == 'MOVING'
-    
-                sim =  calc_voxel_similarity(track, det,image_shape=(self.H,self.W))
-                
-                if sim > best_sim and sim > self.lost_ass_threshold:
-                    best_sim = sim
-                    best_track = (idx, track)
-            
-            if best_track:
-                idx, track = best_track
-                track.update(det, frame_id)
-                track.state = "tentative"
-                if track.hits > track.min_hits_to_activate:
-                    track.state = "active"
-                revived_tracks.append(track)
-                self.lost_tracks.pop(idx)
-                unmatched_detections.remove(det)
-                matched_detections.add(id(det))
-        
-        for det in unmatched_detections[:]:
-            for track in tentative_tracks:
-                if (not track.matched and
-                    det.get("sam_id") == track.sam_id):
-                    if  calc_voxel_similarity(track, det,image_shape=(self.H,self.W)) > self.tentative_ass_threshold:
-                        track.update(det, frame_id)
-                        track.matched = True
-                        unmatched_detections.remove(det)
-                        break
-        
-        if len(tentative_tracks) > 0 and len(unmatched_detections) > 0:
-            tentative_track_vis_embs = np.array([t.embedding for t in tentative_tracks])
-            tentative_det_vis_embs = np.array([d["embedding"] for d in unmatched_detections])
-            vis_dim = _infer_embedding_dim(cfg.embeddings.vis_embedding_dim, tentative_track_vis_embs, tentative_det_vis_embs)
-            tentative_track_vis_embs = _ensure_embedding_2d(tentative_track_vis_embs, vis_dim)
-            tentative_det_vis_embs = _ensure_embedding_2d(tentative_det_vis_embs, vis_dim)
-            
-            tentative_vis_norm = tentative_track_vis_embs / (np.linalg.norm(tentative_track_vis_embs, axis=1, keepdims=True) + 1e-8)
-            tentative_det_vis_norm = tentative_det_vis_embs / (np.linalg.norm(tentative_det_vis_embs, axis=1, keepdims=True) + 1e-8)
-            tentative_vis_sim_matrix = tentative_vis_norm @ tentative_det_vis_norm.T
-        else:
-            tentative_vis_sim_matrix = np.zeros((0, 0))
-        
-        (_, _, tentative_filter_mask) = _compute_filter_matrices(
-            tentative_tracks, unmatched_detections, self.text_emb_threshold, self.max_dist_multiplier
+        for _, _, track, det in lost_assignments:
+            track.update(det, frame_id)
+            track.state = "tentative"
+            if track.hits > track.min_hits_to_activate:
+                track.state = "active"
+            revived_tracks.append(track)
+            matched_detections.add(id(det))
+
+        if matched_lost_idx:
+            self.lost_tracks = [
+                track for idx, track in enumerate(self.lost_tracks)
+                if idx not in matched_lost_idx
+            ]
+        if matched_lost_det_idx:
+            unmatched_detections = [
+                det for idx, det in enumerate(unmatched_detections)
+                if idx not in matched_lost_det_idx
+            ]
+
+        tentative_assignments, _, matched_tent_det_idx = assign_tracks(
+            tentative_tracks, unmatched_detections,
+            self.tentative_ass_threshold,
+            prefer_sam_id=True,
         )
-        
-        for det_idx, det in enumerate(unmatched_detections[:]):
-            best_track = None
-            best_sim = 0
-            
-            for track_idx, track in enumerate(tentative_tracks):
-                if track.matched:
-                    continue
-                
-                visual_sim = tentative_vis_sim_matrix[track_idx, det_idx] if len(tentative_vis_sim_matrix) > 0 else 0.0
-                
-                if not track.should_allow_association(visual_sim, self.emb_threshold):
-                    continue
-                
-                if track.is_dynamic and visual_sim > self.emb_threshold:
-                    if len(tentative_filter_mask) > 0:
-                        text_pass = _check_text_filter_only(
-                            track.text_embedding, det["text_embedding"],
-                            self.text_emb_threshold
-                        )
-                        if not text_pass:
-                            continue
-                else:
-                    if len(tentative_filter_mask) > 0 and not tentative_filter_mask[track_idx, det_idx]:
-                        continue
-                
-                sim =  calc_voxel_similarity(track, det,image_shape=(self.H,self.W))
-                if sim > best_sim and sim > self.tentative_ass_threshold:
-                    best_sim = sim
-                    best_track = track
-            
-            if best_track:
-                best_track.update(det, frame_id)
-                best_track.matched = True
-                unmatched_detections.remove(det)
-                matched_detections.add(id(det))
+        for _, _, track, det in tentative_assignments:
+            track.update(det, frame_id)
+            track.matched = True
+            matched_detections.add(id(det))
+
+        if matched_tent_det_idx:
+            unmatched_detections = [
+                det for idx, det in enumerate(unmatched_detections)
+                if idx not in matched_tent_det_idx
+            ]
         
         for det in unmatched_detections:
             is_dynamic = str(det['cls']).lower() in self.dynamic_classes_list
