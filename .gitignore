@@ -13,3 +13,8 @@ Depth-Anything-3/da3_streaming/weights
 Depth-Anything-3/da3_streaming/exps/
 Depth-Anything-3/da3_streaming/.cache
 */.flake8
+/data/
+Depth-Anything-3/.gitignore
+Depth-Anything-3/.gitattributes
+Depth-Anything-3/.gitmodules
+Depth-Anything-3/.pre-commit-config.yaml
