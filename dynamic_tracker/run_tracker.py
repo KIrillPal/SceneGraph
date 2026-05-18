@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--dynamic-classes",
         required=True,
         type=Path,
-        help="Text file with '<class>, <static|dynamic>' lines",
+        help="Text file with '<description>, <class>, <static|dynamic>' lines; legacy '<object>, <static|dynamic>' is also accepted",
     )
     parser.add_argument(
         "--embedding-type",
@@ -71,12 +71,24 @@ def parse_class_statuses(class_status_file: Path) -> dict[str, str]:
                 continue
 
             parts = [part.strip() for part in line.split(",")]
-            if len(parts) != 2 or not parts[0]:
+            if len(parts) == 2:
+                class_name, status = parts[0].lower(), parts[1].lower()
+            elif len(parts) == 3:
+                class_name, status = parts[1].lower(), parts[2].lower()
+                if not class_name:
+                    raise ValueError(
+                        f"Bad class status line {line_no}: class field is empty"
+                    )
+            else:
                 raise ValueError(
-                    f"Bad class status line {line_no}: expected '<class>, <static|dynamic>'"
+                    f"Bad class status line {line_no}: expected '<description>, <class>, <static|dynamic>'"
                 )
 
-            class_name, status = parts[0].lower(), parts[1].lower()
+            class_name = "_".join(class_name.split())
+            if not class_name:
+                raise ValueError(
+                    f"Bad class status line {line_no}: class field is empty"
+                )
             if status not in {"static", "dynamic"}:
                 raise ValueError(
                     f"Bad status on line {line_no}: expected 'static' or 'dynamic'"

@@ -53,7 +53,7 @@ def build_user_content(
             "text": (
                 "/no_think\n"
                 "Review these selected video frames jointly. "
-                "Return the unique scene object categories with static/dynamic labels as plain text lines."
+                "Return unique scene object descriptions, canonical classes, and static/dynamic labels as plain text lines."
             ),
         }
     ]
@@ -104,7 +104,11 @@ def build_payload(
     }
 
 
-def parse_objects(assistant_text: str) -> list[tuple[str, str]]:
+def normalize_field(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def parse_objects(assistant_text: str) -> list[tuple[str, str, str]]:
     parsed = []
     seen = set()
     for raw_line in assistant_text.splitlines():
@@ -113,35 +117,36 @@ def parse_objects(assistant_text: str) -> list[tuple[str, str]]:
             continue
         if line.startswith("```"):
             continue
-        parts = [part.strip() for part in line.split(",", maxsplit=1)]
-        if len(parts) != 2:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
             continue
-        name = parts[0].lower()
-        state = parts[1].lower()
-        if not name or state not in {"static", "dynamic"}:
+        description = normalize_field(parts[0])
+        class_name = normalize_field(parts[1]).replace(" ", "_")
+        state = normalize_field(parts[2])
+        if not description or not class_name or state not in {"static", "dynamic"}:
             continue
-        name = re.sub(r"\s+", " ", name)
-        if name in EXCLUDED_OBJECT_NAMES:
+        if class_name in EXCLUDED_OBJECT_NAMES:
             continue
-        if name in seen:
+        key = (description, class_name)
+        if key in seen:
             continue
-        parsed.append((name, state))
-        seen.add(name)
+        parsed.append((description, class_name, state))
+        seen.add(key)
 
     if not parsed:
         raise ValueError("Qwen returned no valid objects")
     return parsed
 
 
-def write_object_list(output_file: Path, objects: list[tuple[str, str]]) -> None:
+def write_object_list(output_file: Path, objects: list[tuple[str, str, str]]) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{name}, {state}" for name, state in objects]
+    lines = [f"{description}, {class_name}, {state}" for description, class_name, state in objects]
     output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract scene object prompts and static/dynamic labels from selected frames using Qwen."
+        description="Extract scene object descriptions, classes, and static/dynamic labels from selected frames using Qwen."
     )
     parser.add_argument("selected_image_dir", type=Path, help="Folder with selected keyframe images")
     parser.add_argument(

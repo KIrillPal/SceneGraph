@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import torch
 from torchvision.ops import nms
@@ -132,8 +132,11 @@ def save_embeddings(frame_embeds: List[torch.Tensor], save_path: str) -> None:
     for i in range(len(frame_embeds)):
         np.savez(f'{save_path}/embeds/{i}.npz', frame_embeds[i].cpu().detach().float().numpy(), i)
 
-def merge_predicts(object_names: List[str], 
-                   preds: Dict[str, Dict[int, Sam3Output]]) -> Tuple[List[Dict[str, List]], int]:
+def merge_predicts(
+    object_names: List[str],
+    preds: Dict[str, Dict[int, Sam3Output]],
+    object_class_names: Optional[Dict[str, str]] = None,
+) -> Tuple[List[Dict[str, List]], int]:
     """
     Merge predictions across classes, assigning unique global IDs.
 
@@ -171,7 +174,9 @@ def merge_predicts(object_names: List[str],
                         pred["out_boxes_xywh"][mask_id]
                     )
                     objects_per_frame[i]["confs"].append(pred["out_probs"][mask_id])
-                    objects_per_frame[i]["classes"].append(name)
+                    objects_per_frame[i]["classes"].append(
+                        object_class_names.get(name, name) if object_class_names else name
+                    )
         id_shift += max_id
         # print(name, max_id, id_shift)
     return objects_per_frame, id_shift

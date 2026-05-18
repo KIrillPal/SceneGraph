@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         "--objects-file",
         type=Path,
         default=None,
-        help="Use an existing '<object>, <static|dynamic>' txt instead of calling Qwen",
+        help="Use an existing '<description>, <class>, <static|dynamic>' txt instead of calling Qwen",
     )
 
     parser.add_argument("--pipeline-image", default="dynamic-tracker")
