@@ -104,8 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen-timeout", type=int, default=900, help="Seconds to wait for Qwen server")
     parser.add_argument(
         "--qwen-container-name",
-        default=None,
-        help="Defaults to qwen-pipeline-<output-folder-name>",
+        default="qwen-for-tracker",
+        help="Qwen Docker container name to reuse or create",
     )
     parser.add_argument(
         "--start-qwen",
@@ -637,13 +637,20 @@ def run_qwen_objects(args: argparse.Namespace, qwen_gpu: str, scene_dir: Path) -
         print(f"Skipping Qwen object extraction; found {objects_path}")
         return
 
-    container_name = args.qwen_container_name or f"qwen-pipeline-{scene_dir.name}"
+    container_name = args.qwen_container_name
     started = False
+    reused = False
     qwen_logs_process = None
     try:
         if args.start_qwen:
-            started = True
-            qwen_logs_process = start_qwen(args, qwen_gpu, container_name)
+            status = None if args.dry_run else get_container_status(container_name)
+            if status == "running":
+                print(f"Reusing running Qwen container: {container_name}")
+                reused = True
+                wait_for_qwen(args.qwen_port, 30, container_name)
+            else:
+                started = True
+                qwen_logs_process = start_qwen(args, qwen_gpu, container_name)
         elif not args.dry_run:
             wait_for_qwen(args.qwen_port, 30)
 
@@ -661,7 +668,7 @@ def run_qwen_objects(args: argparse.Namespace, qwen_gpu: str, scene_dir: Path) -
         ]
         run_cmd(cmd, dry_run=args.dry_run)
     finally:
-        if started and not args.keep_qwen_running:
+        if started and not reused and not args.keep_qwen_running:
             stop_qwen(container_name, args.dry_run)
         if started:
             stop_logs_process(qwen_logs_process)
