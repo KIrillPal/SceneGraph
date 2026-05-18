@@ -20,6 +20,18 @@ parser = argparse.ArgumentParser(
 parser.add_argument("image_folder", type=str, help="Path to folder with images")
 parser.add_argument("txt_path", type=str, help="Path .txt with unique objects in scene")
 parser.add_argument("save_path", type=str, help="Path to folder where to save predicted masks and embeddings")
+parser.add_argument(
+    "--score-threshold-detection",
+    type=float,
+    default=0.2,
+    help="Minimum SAM3 detection confidence before tracking",
+)
+parser.add_argument(
+    "--new-det-threshold",
+    type=float,
+    default=0.4,
+    help="Minimum confidence for adding a detection as a new object track",
+)
 args = parser.parse_args()      
 
 
@@ -41,6 +53,8 @@ def read_object_names(txt_path: str) -> list[str]:
 os.makedirs(f'{args.save_path}/tracks', exist_ok=True)
 
 predictor = build_sam3_video_predictor(checkpoint_path="/workspace/sam3/sam3.pt")
+predictor.model.score_threshold_detection = args.score_threshold_detection
+predictor.model.new_det_thresh = args.new_det_threshold
 image_names = os.listdir(args.image_folder)
 image = cv2.imread(f"{args.image_folder}/{image_names[0]}")
 h, w, c = image.shape

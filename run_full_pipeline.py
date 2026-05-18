@@ -47,6 +47,18 @@ def parse_args() -> argparse.Namespace:
         help="GPU policy: 'i' uses one GPU for all steps; 'i,j' uses i for pipeline and j for Qwen",
     )
     parser.add_argument("--embedding-type", choices=("dinov2", "dinov3", "sam"), default="dinov3")
+    parser.add_argument(
+        "--sam3-score-threshold",
+        type=float,
+        default=0.2,
+        help="Minimum SAM3 detection confidence before tracking",
+    )
+    parser.add_argument(
+        "--sam3-new-det-threshold",
+        type=float,
+        default=0.4,
+        help="Minimum confidence for adding a SAM3 detection as a new object track",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Recompute existing stage outputs")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
     parser.add_argument(
@@ -740,6 +752,10 @@ def run_sam3(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> None
         data_path(args, scene_dir / "images"),
         data_path(args, scene_dir / "objects.txt"),
         data_path(args, scene_dir / "sam3_outputs"),
+        "--score-threshold-detection",
+        str(args.sam3_score_threshold),
+        "--new-det-threshold",
+        str(args.sam3_new_det_threshold),
     ]
     run_cmd(cmd, dry_run=args.dry_run)
     if not args.dry_run:
@@ -814,6 +830,8 @@ def main() -> None:
             "fps": args.fps,
             "num_keyframes": args.num_keyframes,
             "embedding_type": args.embedding_type,
+            "sam3_score_threshold": args.sam3_score_threshold,
+            "sam3_new_det_threshold": args.sam3_new_det_threshold,
             "pipeline_image": args.pipeline_image,
             "da3_image": args.da3_image,
             "sam3_image": args.sam3_image,
