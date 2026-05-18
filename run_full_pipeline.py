@@ -29,11 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", type=Path, default=None, help="Input .mp4 video")
     parser.add_argument("--image-folder", type=Path, default=None, help="Input folder with extracted images")
     parser.add_argument(
-        "--scene-id",
+        "--data-root",
+        type=Path,
         default=None,
-        help="Scene id under data/. Defaults to input stem",
+        help="Directory mounted as data/ in containers. Defaults to the output folder parent.",
     )
-    parser.add_argument("--data-root", type=Path, default=REPO_ROOT / "data")
     parser.add_argument(
         "--fps",
         type=float,
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         "--log-dir",
         type=Path,
         default=None,
-        help="Pipeline log directory. Defaults to data/<scene-id>/logs",
+        help="Pipeline log directory. Defaults to <output-folder>/logs",
     )
     parser.add_argument(
         "--hf-cache-dir",
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qwen-container-name",
         default=None,
-        help="Defaults to qwen-pipeline-<scene-id>",
+        help="Defaults to qwen-pipeline-<output-folder-name>",
     )
     parser.add_argument(
         "--start-qwen",
@@ -151,12 +151,20 @@ def parse_gpu_policy(value: str) -> tuple[str, str]:
     raise ValueError("--gpus must be either 'i' or 'i,j'")
 
 
-def rel_to_repo(path: Path) -> Path:
+def default_scene_dir(args: argparse.Namespace) -> Path:
+    source = args.input_source.resolve()
+    if args.input_mode == "video":
+        return source.parent
+    return source.parent
+
+
+def data_path(args: argparse.Namespace, path: Path) -> str:
     path = path.resolve()
     try:
-        return path.relative_to(REPO_ROOT)
+        relative = path.relative_to(args.data_root)
     except ValueError as exc:
-        raise ValueError(f"Path must be inside repo root for container mapping: {path}") from exc
+        raise ValueError(f"Path must be inside data root for container mapping: {path}") from exc
+    return str(Path("data") / relative)
 
 
 def list_images(path: Path) -> list[Path]:
@@ -429,8 +437,8 @@ def run_frame_extraction(args: argparse.Namespace, worker_gpu: str, scene_dir: P
     cmd = docker_pipeline_base(args.pipeline_image, worker_gpu, args.data_root, args) + [
         "python",
         "utils/video_to_frames.py",
-        str(rel_to_repo(video_path)),
-        str(rel_to_repo(images_dir)),
+        data_path(args, video_path),
+        data_path(args, images_dir),
         "--fps",
         str(args.fps),
         "--start-index",
@@ -456,9 +464,9 @@ def run_keyframes(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) ->
         "python",
         "MaxInfo/pvsg_maxinfo_filter.py",
         "--input_dir",
-        str(rel_to_repo(scene_dir / "images")),
+        data_path(args, scene_dir / "images"),
         "--output_dir",
-        str(rel_to_repo(selected_dir)),
+        data_path(args, selected_dir),
         "--num-frames",
         str(args.num_keyframes),
         "--fp16",
@@ -687,9 +695,9 @@ def run_da3(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> None:
         "python",
         "da3_streaming.py",
         "--image_dir",
-        f"data/{scene_dir.name}/images",
+        data_path(args, scene_dir / "images"),
         "--output_dir",
-        f"data/{scene_dir.name}/da3_outputs",
+        data_path(args, scene_dir / "da3_outputs"),
         "--chunk-param-mode",
         "dynamic",
     ]
@@ -729,9 +737,9 @@ def run_sam3(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> None
         args.sam3_image,
         "python",
         "run_inference.py",
-        f"data/{scene_dir.name}/images",
-        f"data/{scene_dir.name}/objects.txt",
-        f"data/{scene_dir.name}/sam3_outputs",
+        data_path(args, scene_dir / "images"),
+        data_path(args, scene_dir / "objects.txt"),
+        data_path(args, scene_dir / "sam3_outputs"),
     ]
     run_cmd(cmd, dry_run=args.dry_run)
     if not args.dry_run:
@@ -752,12 +760,12 @@ def run_tracker(args: argparse.Namespace, worker_gpu: str, scene_dir: Path) -> N
     cmd = base[:-1] + cotracker_cache_args() + [base[-1],
         "python",
         "dynamic_tracker/run_tracker.py",
-        f"data/{scene_dir.name}/images",
-        f"data/{scene_dir.name}/sam3_outputs",
-        f"data/{scene_dir.name}/da3_outputs",
-        f"data/{scene_dir.name}/tracker_outputs",
+        data_path(args, scene_dir / "images"),
+        data_path(args, scene_dir / "sam3_outputs"),
+        data_path(args, scene_dir / "da3_outputs"),
+        data_path(args, scene_dir / "tracker_outputs"),
         "--dynamic-classes",
-        f"data/{scene_dir.name}/objects.txt",
+        data_path(args, scene_dir / "objects.txt"),
         "--embedding-type",
         args.embedding_type,
     ]
@@ -770,16 +778,18 @@ def main() -> None:
     args = parse_args()
     worker_gpu, qwen_gpu = parse_gpu_policy(args.gpus)
 
-    args.data_root = args.data_root.resolve()
+    scene_dir = default_scene_dir(args).resolve()
+    args.data_root = (args.data_root.resolve() if args.data_root is not None else scene_dir.parent)
     try:
-        args.data_root.relative_to(REPO_ROOT)
+        scene_dir.relative_to(args.data_root)
     except ValueError as exc:
-        raise ValueError("--data-root must be inside the repository for current container path mapping") from exc
+        raise ValueError(f"Output directory must be inside --data-root: {scene_dir}") from exc
+
+    validate_writable_dir(scene_dir, "Output scene directory")
 
     configure_hf(args)
 
-    scene_id = args.scene_id or args.input_source.stem
-    scene_dir = args.data_root / scene_id
+    scene_id = scene_dir.name
     video_path = None
     if args.input_mode == "video":
         video_path = copy_video(args.video, scene_dir, args.overwrite, args.dry_run)
