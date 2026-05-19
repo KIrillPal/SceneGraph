@@ -16,7 +16,8 @@ Each frame NPZ contains:
   - moving_keypoints (optional)
   - keypoint_vis (optional)
   - object_states (optional)
-  - point_cloud
+  - point_cloud_processed
+  - point_cloud_raw
   - intrinsic
   - extrinsic
 """
@@ -53,6 +54,8 @@ logger = logging.getLogger(__name__)
 
 CAMERA_ENTITY = "world/camera"
 ENTITY_SCENE = "world/scene_frame"
+ENTITY_DA3_RAW_ROOT = "da3_raw"
+ENTITY_DA3_RAW = "da3_raw/frame"
 ENTITY_TRACKS = "world/track_points"
 ENTITY_TRACK_VOXELS = "world/track_voxels_merged"
 ENTITY_TRACK_LABELS = "world/track_labels"
@@ -81,8 +84,9 @@ DESCRIPTION = """
 | Entity | Content |
 |--------|---------|
 | `world/camera` | Camera pose + pinhole |
-| `world/scene_frame` | Scene point cloud for the current frame |
-| `world/track_points` | Track point clouds reconstructed from masks |
+| `world/scene_frame` | Legacy confidence-masked scene point cloud, when available |
+| `da3_raw/frame` | Raw per-frame DA3 point cloud |
+| `world/track_points` | Exact processed object point clouds used by the tracker |
 | `world/track_voxels_merged` | Accumulated track geometry, voxelized and logged sparsely |
 | `world/track_labels` | Track ids at 3D centroids |
 | `image/masked` | Image with track masks overlaid |
@@ -223,6 +227,7 @@ def _build_blueprint():
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(name="3D", origin="world"),
+            rrb.Spatial3DView(name="DA3 Raw", origin=ENTITY_DA3_RAW_ROOT),
             rrb.Vertical(
                 rrb.Spatial2DView(name="Masked Image", origin=ENTITY_MASKED_IMAGE),
                 rrb.Spatial2DView(name="Keypoints", origin=ENTITY_KEYPOINT_IMAGE),
@@ -278,6 +283,12 @@ def _load_object_dict(
             for track_id, value in dict(track_map).items()
         }
     return out
+
+
+def _optional_array(data: np.lib.npyio.NpzFile, key: str) -> Optional[np.ndarray]:
+    if key not in data.files:
+        return None
+    return np.asarray(data[key], dtype=np.float32)
 
 
 def _load_object_states(raw_obj: np.ndarray | dict | None) -> dict[str, str]:
@@ -349,7 +360,12 @@ def _load_frame_payload(frame_path: Path) -> dict[str, object]:
             "object_states": _load_object_states(
                 data["object_states"] if "object_states" in data.files else None
             ),
-            "point_cloud": np.asarray(data["point_cloud"], dtype=np.float32),
+            "point_cloud": _optional_array(data, "point_cloud"),
+            "point_cloud_processed": _load_object_dict(
+                data["point_cloud_processed"] if "point_cloud_processed" in data.files else None,
+                np.float32,
+            ),
+            "point_cloud_raw": _optional_array(data, "point_cloud_raw"),
             "intrinsic": np.asarray(data["intrinsic"], dtype=np.float32),
             "extrinsic": np.asarray(data["extrinsic"], dtype=np.float32),
         }
@@ -750,6 +766,26 @@ def _extract_track_clouds(
     return clouds
 
 
+def _extract_processed_track_clouds(
+    point_cloud_processed: dict[str, dict[int, np.ndarray]],
+    voxel_size: float = 0.0,
+    enable_sor: bool = False,
+) -> list[tuple[int, np.ndarray]]:
+    clouds: list[tuple[int, np.ndarray]] = []
+    for track_map in point_cloud_processed.values():
+        for track_id, points in track_map.items():
+            points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+            finite_mask = np.isfinite(points).all(axis=1)
+            points = points[finite_mask]
+            if enable_sor:
+                points, _ = statistical_outlier_removal(points)
+            points, _ = _voxel_downsample(points, None, voxel_size)
+            if len(points) == 0:
+                continue
+            clouds.append((int(track_id), points))
+    return clouds
+
+
 def _log_camera_transform(
     extrinsic_c2w: np.ndarray,
     intrinsic: np.ndarray,
@@ -938,6 +974,7 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
 
     rr.script_setup(rr_args, "3d_tracker_rrd")
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
+    rr.log(ENTITY_DA3_RAW_ROOT, rr.ViewCoordinates.RDF, static=True)
     rr.log(
         "description",
         rr.TextDocument(DESCRIPTION, media_type=rr.MediaType.MARKDOWN),
@@ -957,14 +994,19 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
         moving_keypoints = payload["moving_keypoints"]
         keypoint_vis = payload["keypoint_vis"]
         object_states = payload["object_states"]
-        point_cloud = np.asarray(payload["point_cloud"], dtype=np.float32)
+        point_cloud = payload["point_cloud"]
+        point_cloud_processed = payload["point_cloud_processed"]
+        point_cloud_raw = payload["point_cloud_raw"]
         intrinsic = np.asarray(payload["intrinsic"], dtype=np.float32)
         extrinsic = np.asarray(payload["extrinsic"], dtype=np.float32)
 
         rr.set_time_sequence("frame", frame_id)
         rr.set_time_seconds("time", frame_id / float(DEFAULT_CONFIG["fps"]))
 
-        h_pc, w_pc = point_cloud.shape[:2]
+        camera_cloud = point_cloud_raw if point_cloud_raw is not None else point_cloud
+        if camera_cloud is None:
+            raise ValueError(f"Missing point cloud data in {frame_path}")
+        h_pc, w_pc = camera_cloud.shape[:2]
         _log_camera_transform(extrinsic, intrinsic, (w_pc, h_pc))
 
         masked_image = _render_masked_image(
@@ -1003,9 +1045,13 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
                 rr.send_blueprint(blueprint, make_active=True, make_default=True)
             blueprint_sent = True
 
-        scene_points, scene_colors = _extract_scene_points(
-            image, point_cloud, voxel_size=scene_voxel_size
-        )
+        if point_cloud is not None:
+            scene_points, scene_colors = _extract_scene_points(
+                image, point_cloud, voxel_size=scene_voxel_size
+            )
+        else:
+            scene_points = np.zeros((0, 3), dtype=np.float32)
+            scene_colors = None
         _log_points(
             scene_points,
             scene_colors,
@@ -1014,12 +1060,36 @@ def run_from_export(export_dir: Path, rr_args: argparse.Namespace) -> None:
             static=False,
         )
 
-        track_clouds = _extract_track_clouds(
-            masks,
-            point_cloud,
-            voxel_size=track_voxel_size,
-            enable_sor=enable_sor,
+        if point_cloud_raw is not None:
+            raw_points, raw_colors = _extract_scene_points(
+                image, point_cloud_raw, voxel_size=scene_voxel_size
+            )
+        else:
+            raw_points = np.zeros((0, 3), dtype=np.float32)
+            raw_colors = None
+        _log_points(
+            raw_points,
+            raw_colors,
+            ENTITY_DA3_RAW,
+            subsample=int(DEFAULT_CONFIG["scene_sub"]),
+            static=False,
         )
+
+        if point_cloud_processed:
+            track_clouds = _extract_processed_track_clouds(
+                point_cloud_processed,
+                voxel_size=track_voxel_size,
+                enable_sor=enable_sor,
+            )
+        elif point_cloud is not None:
+            track_clouds = _extract_track_clouds(
+                masks,
+                point_cloud,
+                voxel_size=track_voxel_size,
+                enable_sor=enable_sor,
+            )
+        else:
+            track_clouds = []
         _log_track_id_labels(track_clouds, track_colors, _track_classes_from_masks(masks))
         track_points, track_point_colors = _merge_track_clouds(
             track_clouds, track_colors

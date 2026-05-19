@@ -420,6 +420,9 @@ class Track:
         # Per-frame data
         self.masks: Dict[int, np.ndarray] = {frame_idx: detection["mask"]}
         self.cls: Dict[int, str] = {frame_idx: detection["cls"]}
+        self.points: Dict[int, np.ndarray] = {
+            frame_idx: np.asarray(detection["points"], dtype=np.float32)
+        }
         self.embeddings: Dict[int, np.ndarray] = {
             frame_idx: np.asarray(detection["embedding"], dtype=np.float32).reshape(-1)
         }
@@ -710,6 +713,7 @@ class Track:
         
         self.masks[frame_idx] = detection["mask"]
         self.cls[frame_idx] = detection["cls"]
+        self.points[frame_idx] = np.asarray(detection["points"], dtype=np.float32)
         self.embeddings[frame_idx] = np.asarray(
             detection["embedding"], dtype=np.float32
         ).reshape(-1)

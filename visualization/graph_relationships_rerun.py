@@ -284,7 +284,12 @@ def run_from_export(
         frame_id = int(payload["frame_id"])
         image = np.asarray(payload["image"])
         masks = payload["masks"]
-        point_cloud = np.asarray(payload["point_cloud"], dtype=np.float32)
+        point_cloud = payload["point_cloud"]
+        if point_cloud is None:
+            point_cloud = payload["point_cloud_raw"]
+        if point_cloud is None:
+            raise ValueError(f"Missing point cloud data in {frame_path}")
+        point_cloud = np.asarray(point_cloud, dtype=np.float32)
         intrinsic = np.asarray(payload["intrinsic"], dtype=np.float32)
         extrinsic = np.asarray(payload["extrinsic"], dtype=np.float32)
 

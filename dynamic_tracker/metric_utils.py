@@ -20,7 +20,7 @@ def compute_bidirectional_gaussian_ioa_fast(
     points_d: np.ndarray,
     voxel_size: float = cfg.voxel_map.voxel_size,
     sigma: Optional[float] = None,
-    use_approximation: bool = True,
+    use_approximation: bool = False,
     low_iou_thresh: float = 0.01,
     high_iou_thresh: float = 0.95,
     max_points: int = 500,

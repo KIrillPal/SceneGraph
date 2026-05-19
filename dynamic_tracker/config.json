@@ -9,7 +9,7 @@
     "velocity_buffer_size": 10
   },
   "voxel_map": {
-    "voxel_size": 0.05,
+    "voxel_size": 0.02,
     "alpha": 0.3,
     "max_age": 300,
     "max_age_moving": 5
@@ -81,8 +81,8 @@
   },
   "point_cloud": {
     "sor_k": 10,
-    "sor_std_ratio": 1.5,
-    "da3_conf_thresh_mul": 0.5
+    "sor_std_ratio": 2.5,
+    "da3_conf_thresh_mul": 0.3
   },
   "feature_extraction": {
     "text_model_name": "all-MiniLM-L6-v2",

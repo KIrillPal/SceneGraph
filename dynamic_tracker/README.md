@@ -184,7 +184,7 @@ Using SAM embeddings instead of DINO:
 
 ## Output
 
-The dynamic tracker writes the same per-frame `.npz` format as the static tracker:
+The dynamic tracker writes one `.npz` file per frame:
 
 ```text
 frame_000000.npz
@@ -200,11 +200,14 @@ image
 masks
 embeddings
 object_states
-point_cloud
+point_cloud_processed
+point_cloud_raw
 intrinsic
 extrinsic
 ```
 
 `object_states` is copied from the static/dynamic text file and maps class names to `static` or `dynamic`.
+`point_cloud_processed` stores the exact per-object point clouds returned by `get_obj_point_cloud(...)` and used during tracker matching.
+`point_cloud_raw` stores the raw dense DA3 world-space point cloud for the frame.
 
 This output is compatible with the existing visualization and downstream frame-selection scripts.

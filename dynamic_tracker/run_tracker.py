@@ -177,22 +177,16 @@ def read_extrinsics(extrinsics_file: Path, num_frames: int) -> list[np.ndarray]:
     return extrinsics[:num_frames]
 
 
-def get_dense_da3_frame_data(
+def get_raw_da3_frame_data(
     depth_dir: Path,
     extrinsics: list[np.ndarray],
     num_frames: int,
-    conf_thresh_mul: float | None = None,
 ) -> list[dict[str, np.ndarray]]:
     from point_utils import depth_to_point_cloud_vectorized
 
-    conf_thresh_mul = (
-        cfg.point_cloud.da3_conf_thresh_mul
-        if conf_thresh_mul is None
-        else conf_thresh_mul
-    )
     frame_data = []
 
-    logger.info("Getting dense DA3 frame data from %s", depth_dir)
+    logger.info("Getting raw DA3 frame data from %s", depth_dir)
     for frame_idx in tqdm(
         range(num_frames), desc="Loading DA3 frames", unit="frame", dynamic_ncols=True
     ):
@@ -200,23 +194,19 @@ def get_dense_da3_frame_data(
         data = np.load(frame_file)
 
         depth = np.asarray(data["depth"], dtype=np.float32)
-        conf = np.asarray(data["conf"], dtype=np.float32)
         intrinsic = np.asarray(data["intrinsics"], dtype=np.float32)
         extrinsic = np.asarray(extrinsics[frame_idx], dtype=np.float32)
 
         w2c = np.linalg.inv(extrinsic)[:3, :]
-        dense_points = depth_to_point_cloud_vectorized(
+        raw_points = depth_to_point_cloud_vectorized(
             depth[np.newaxis, :, :],
             intrinsic[np.newaxis, :, :],
             w2c[np.newaxis, :, :],
         )[0][0].astype(np.float32)
 
-        valid_mask = conf > (float(conf.mean()) * conf_thresh_mul)
-        dense_points[~valid_mask] = np.nan
-
         frame_data.append(
             {
-                "point_cloud": dense_points,
+                "point_cloud_raw": raw_points,
                 "intrinsic": intrinsic,
                 "extrinsic": extrinsic,
             }
@@ -250,6 +240,7 @@ def save_tracker_outputs(
         embeddings_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
         keypoints_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
         moving_keypoints_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
+        point_clouds_by_class: defaultdict[str, dict[int, np.ndarray]] = defaultdict(dict)
         keypoint_vis: dict[int, dict[str, object]] = {}
 
         for track in all_tracks:
@@ -279,6 +270,12 @@ def save_tracker_outputs(
             class_name = track_labels[track_id]
             masks_by_class[class_name][track_id] = np.asarray(mask, dtype=bool)
 
+            points = getattr(track, "points", {}).get(frame_idx)
+            if points is not None:
+                point_clouds_by_class[class_name][track_id] = np.asarray(
+                    points, dtype=np.float32
+                ).reshape(-1, 3)
+
             embedding = track.embeddings.get(frame_idx)
             if embedding is not None:
                 embeddings_by_class[class_name][track_id] = np.asarray(
@@ -306,8 +303,9 @@ def save_tracker_outputs(
             moving_keypoints=dict(moving_keypoints_by_class),
             keypoint_vis=keypoint_vis,
             object_states=object_states,
-            point_cloud=np.asarray(
-                da3_frame_data[frame_idx]["point_cloud"], dtype=np.float32
+            point_cloud_processed=dict(point_clouds_by_class),
+            point_cloud_raw=np.asarray(
+                da3_frame_data[frame_idx]["point_cloud_raw"], dtype=np.float32
             ),
             intrinsic=np.asarray(
                 da3_frame_data[frame_idx]["intrinsic"], dtype=np.float32
@@ -389,7 +387,7 @@ def main() -> None:
         tracker_extrinsics,
         intrinsics,
     ) = get_da3_pointclouds(str(depth_dir) + os.sep, str(extrinsics_file), len(images))
-    da3_frame_data = get_dense_da3_frame_data(depth_dir, extrinsics, len(images))
+    da3_frame_data = get_raw_da3_frame_data(depth_dir, extrinsics, len(images))
 
     logger.info("Getting text embeddings")
     text_embs = get_text_embeddings(tracks)

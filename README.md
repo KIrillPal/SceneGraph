@@ -70,13 +70,16 @@ Each frame file stores:
 - `image`
 - `masks: dict[str, dict[int, np.ndarray]]`
 - `embeddings: dict[str, dict[int, np.ndarray]]`
-- `point_cloud`
+- `point_cloud_processed: dict[str, dict[int, np.ndarray]]`
+- `point_cloud_raw`
 - `intrinsic`
 - `extrinsic`
 
 Notes:
 
 - object ids are final tracker ids
+- `point_cloud_processed` stores the exact per-object point clouds used by the tracker for matching
+- `point_cloud_raw` stores the raw dense DA3 world-space point cloud for the frame
 - the same export is used by `visualization/tracker_layers_rerun.py` and `frame_selectors/base.py`
 
 ### 4. Build the Visualization
@@ -92,7 +95,7 @@ python visualization/tracker_layers_rerun.py \
 Open the resulting `.rrd` in Rerun to inspect:
 
 - image masks
-- per-frame scene point clouds
-- current tracked object point clouds
-- accumulated object geometry rebuilt online from masks and point clouds
+- per-frame raw DA3 point clouds
+- current tracked object point clouds from the processed tracker clouds
+- accumulated object geometry rebuilt online from processed tracker clouds
 - track ids
