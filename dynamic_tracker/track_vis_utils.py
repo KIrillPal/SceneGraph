@@ -9,7 +9,7 @@ import numpy as np
 from skimage.measure import label, regionprops
 import distinctipy
 from typing import List, Dict, Tuple, Any
-
+from config_loader import cfg
 
 def get_current_tracks(tracker) -> List[Any]:
     """
@@ -160,10 +160,10 @@ def visualize_all_tracks_keypoints(
     image: np.ndarray,
     tracks: List,
     current_frame: int,
-    show_history: int = 10,
-    show_tracks: bool = True,
+    show_history: int = cfg.vis.history_size,
+    show_tracks: bool = cfg.vis.show_tracks,
     image_size: Optional[Tuple[int, int]] = None,
-    debug: bool = False
+    debug: bool = cfg.debug_mode
 ) -> np.ndarray:
     """
     Visualize keypoints for all moving tracks with colored trails.
@@ -345,8 +345,8 @@ def create_keypoint_video(
     video_frames: List[np.ndarray],
     tracks: List,
     output_path: str,
-    show_history: int = 10,
-    fps: int = 30,
+    show_history: int = cfg.vis.history_size,
+    fps: int = cfg.vis.fps,
     debug: bool = False
 ) -> None:
     """

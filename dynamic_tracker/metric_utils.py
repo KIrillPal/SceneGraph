@@ -20,10 +20,10 @@ def compute_bidirectional_gaussian_ioa_fast(
     points_d: np.ndarray,
     voxel_size: float = cfg.voxel_map.voxel_size,
     sigma: Optional[float] = None,
-    use_approximation: bool = True,
-    low_iou_thresh: float = 0.01,
-    high_iou_thresh: float = 0.95,
-    max_points: int = 500,
+    use_approximation: bool = cfg.ioa.use_approximation,
+    low_iou_thresh: float = cfg.ioa.low_iou_thresh,
+    high_iou_thresh: float = cfg.ioa.high_iou_thresh,
+    max_points: int = cfg.ioa.max_points,
 ) -> Tuple[float, float, float]:
     """
     Optimized Gaussian IoA with 10-20x speedup.
@@ -383,7 +383,7 @@ def calc_voxel_similarity(
     w_keypoints: float = None, # Will be set based on static/dynamic
     w_emb: float = None,
     image_shape: Optional[Tuple[int, int]] = None,
-    debug: bool = True
+    debug: bool = cfg.debug_mode
 ) -> float:
     """
     Compute combined similarity between track and detection.

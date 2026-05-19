@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import List, Tuple, Dict
-
+from config_loader import cfg
 
 def adaptive_erode_mask_area(
-    mask: np.ndarray, target_area_ratio: float = 0.85
+    mask: np.ndarray, target_area_ratio: float = cfg.mask.target_area_ratio
 ) -> np.ndarray:
     """
     Erode mask to achieve target area ratio while preserving shape.
@@ -34,7 +34,7 @@ def adaptive_erode_mask_area(
 
     # Iteratively increase kernel size until target ratio reached
     kernel_size = 3
-    while kernel_size <= 7:
+    while kernel_size <= cfg.mask.max_kernel_size:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
         )
@@ -51,7 +51,7 @@ def adaptive_erode_mask_area(
     return cv2.erode(mask, kernel, iterations=1)
 
 
-def safe_erode(mask: np.ndarray, min_area_after: int = 32) -> np.ndarray:
+def safe_erode(mask: np.ndarray, min_area_after: int = cfg.mask.min_area_after) -> np.ndarray:
     """
     Safely erode mask with rollback if it becomes too small.
 
@@ -86,10 +86,10 @@ class FastPixelDBSCAN:
 
     def __init__(
         self,
-        target_size: int = 300,
-        eps_pixels: int = 20,
-        min_samples: int = 10,
-        upscale_method: str = "nearest",
+        target_size: int = cfg.dbscan.target_size,
+        eps_pixels: int = cfg.dbscan.eps_pixels,
+        min_samples: int = cfg.dbscan.min_samples,
+        upscale_method: str = cfg.dbscan.upscale_method,
     ):
         """
         Args:
@@ -211,7 +211,7 @@ class FastPixelDBSCAN:
         return masks, n_pixels, n_clusters
 
 
-def merge_masks(tracks: Dict[int, Dict], area_size: int = 50) -> Dict[int, Dict]:
+def merge_masks(tracks: Dict[int, Dict], area_size: int = cfg.mask.area_size) -> Dict[int, Dict]:
     """
     Merge fragmented masks within tracks and split into new tracks if needed.
 
