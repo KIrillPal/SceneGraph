@@ -150,7 +150,7 @@ def _get_3d_for_keypoints(
     keypoints: np.ndarray,
     points_2d: np.ndarray,
     points_3d: np.ndarray,
-    max_distance: float = 10.0
+    max_distance: float = cfg.cotracker.max_distance
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Map 2D keypoints to 3D coordinates using nearest neighbor search."""
     if len(keypoints) == 0 or len(points_2d) == 0:
@@ -243,7 +243,7 @@ class ObjectState:
         self.v_buffer: List[float] = []
         self.size_buffer: List[float] = []
         self.v_avg = 0.0
-        self.size_avg = 0.2
+        self.size_avg = cfg.object_size.min_object_size
     
     def update(
         self,
@@ -269,7 +269,7 @@ class ObjectState:
             self.size_buffer.pop(0)
         
         self.v_avg = np.mean(self.v_buffer)
-        self.size_avg = max(0.2, np.mean(self.size_buffer))
+        self.size_avg = max(cfg.object_size.min_object_size, np.mean(self.size_buffer))
         
         normalized_velocity = self.v_avg / self.size_avg
         
@@ -356,7 +356,7 @@ class MedianEMAFilter:
         """Update filter with new value."""
         self.history.append(value)
         
-        if len(self.history) >= 3:
+        if len(self.history) >= self.median_window:
             median_filtered = np.median(list(self.history), axis=0)
         else:
             median_filtered = value
@@ -388,12 +388,12 @@ class Track:
         self.is_dynamic = is_dynamic
         
         # Embeddings with smoothing
-        self.text_embedding_smoother = MedianEMAFilter(ema_alpha=0.85, median_window=5)
+        self.text_embedding_smoother = MedianEMAFilter(ema_alpha=cfg.ema.text_alpha, median_window=cfg.ema.text_window)
         self.text_embedding = self.text_embedding_smoother.update(
             detection["text_embedding"]
         )
         
-        self.embedding_smoother = MedianEMAFilter(ema_alpha=0.95, median_window=10)
+        self.embedding_smoother = MedianEMAFilter(ema_alpha=cfg.ema.vis_alpha, median_window=cfg.ema.vis_window)
         self.embedding = self.embedding_smoother.update(detection["embedding"])
         
         # Initial points
@@ -405,7 +405,7 @@ class Track:
         # Object size tracking
         self.detection_size = compute_object_size(points)
         self.voxel_size = self.detection_size
-        self.size_history = deque(maxlen=10)
+        self.size_history = deque(maxlen=cfg.object_size.size_history_len)
         self.size_history.append(self.detection_size)
         self.use_detection_size = (
             cfg.object_size.use_detection_size_for_moving and is_dynamic
@@ -521,13 +521,13 @@ class Track:
         self.predicted_pos_2d = current_center
         self.last_predicted_pos_2d = current_center.copy()
         
-        if valid_points >= max(cfg.cotracker.min_keypoints_visible, total_points * 0.3):
+        if valid_points >= max(cfg.cotracker.min_keypoints_visible, total_points * cfg.cotracker.min_visible_part):
             self.visibility_state = "VISIBLE"
             self.cotracker_is_visible = True
-        elif low_vis_points >= max(2, total_points * 0.3):
+        elif low_vis_points >= max(2, total_points * cfg.cotracker.min_visible_part):
             self.visibility_state = "OCCLUDED"
             self.cotracker_is_visible = True
-        elif outside_points >= total_points * 0.5:
+        elif outside_points >= total_points * cfg.cotracker.min_inside_part:
             self.visibility_state = "OUTSIDE_FRAME"
             self.cotracker_is_visible = False
         else:
@@ -726,9 +726,9 @@ class SmartUpdateRules:
     """Track update rules based on bidirectional IoA."""
     
     def __init__(self):
-        self.high_overlap_threshold = 0.7
-        self.medium_overlap_threshold = 0.4
-        self.re_init_threshold = 0.1
+        self.high_overlap_threshold = cfg.update_rules.high_overlap_threshold
+        self.medium_overlap_threshold = cfg.update_rules.medium_overlap_threshold
+        self.re_init_threshold = cfg.update_rules.re_init_threshold
     
     def decide_update(
         self,

@@ -1,8 +1,36 @@
-{
+{ 
   "tracking": {
     "device": "cuda",
     "dynamic_classes": ["car", "person"]
   },
+  "debug_mode" : true,
+  "mask":
+  {
+  "target_area_ratio":0.85,
+   "max_kernel_size":7,
+   "min_area_after":32,
+   "area_size":50
+},
+"dbscan":
+{
+"target_size":300,
+"eps_pixels":20,
+"min_samples":10,
+"upscale_method":"nearest"
+},
+"ioa":
+{
+"use_approximation":false,
+"low_iou_thresh":0.01,
+"high_iou_thresh":0.95,
+"max_points":500
+},
+"vis":
+{
+"show_tracks":true,
+"fps":30,
+"history_size":10
+},
   "motion": {
     "t_start": 0.07,
     "t_stop": 0.03,
@@ -42,13 +70,28 @@
     "min_keypoints_visible": 3,
     "max_rmse": 0.1,
     "max_drift_px": 150.0,
-    "use_moving_keypoints": true
+    "use_moving_keypoints": true,
+    "max_distance": 10,
+    "min_visible_part" : 0.3,
+    "min_inside_part" : 0.5
   },
+  "update_rules":{
+   "high_overlap_threshold":0.7,
+   "medium_overlap_threshold":0.4,
+   "re_init_threshold":0.1
+},
+  "ema":{
+  "text_alpha": 0.85,
+  "text_window": 5,
+  "vis_alpha": 0.95,
+  "vis_window": 10
+},
   "object_size": {
     "use_detection_size_for_moving": true,
     "min_object_size": 0.2,
     "size_smoothing_alpha": 0.3,
-    "max_size_increase_factor": 2.0
+    "max_size_increase_factor": 2.0,
+    "size_history_len" : 10
   },
   "visibility": {
     "outside_frame_margin": 50
